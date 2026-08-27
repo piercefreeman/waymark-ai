@@ -11,6 +11,7 @@ from pydantic_ai.messages import (
     ModelResponse,
     RetryPromptPart,
     ToolCallPart,
+    tool_return_content_ta,
 )
 from pydantic_ai.tools import DeferredToolResult, DeferredToolResults
 
@@ -171,7 +172,8 @@ def deferred_results(
     for result in results:
         tool_call_id = result["tool_call_id"]
         if result["kind"] == "return":
-            calls[tool_call_id] = result["value"]
+            # NOTE: Work around Waymark returning persisted action values as JSON-compatible data.
+            calls[tool_call_id] = tool_return_content_ta.validate_python(result["value"])
         elif result["kind"] == "model_retry":
             calls[tool_call_id] = ModelRetry(result["message"])
         elif result["kind"] == "tool_failed":
