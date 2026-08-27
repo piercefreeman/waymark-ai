@@ -29,18 +29,16 @@ it.
 
 ## Install
 
-The project and lockfile are controlled by [uv](https://docs.astral.sh/uv/):
+Add the package to your project from PyPI:
 
 ```bash
-uv sync
+uv add pydantic-ai-waymark
 ```
 
-The project uses the latest Waymark `0.30` development release.
-
-Install the provider used by the example:
+Include the OpenAI provider used by the example with the `openai` extra:
 
 ```bash
-uv sync --extra openai
+uv add "pydantic-ai-waymark[openai]"
 ```
 
 ## Define an agent
