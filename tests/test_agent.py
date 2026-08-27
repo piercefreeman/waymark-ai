@@ -559,7 +559,7 @@ def test_tools_parallelize_around_sequential_barriers() -> None:
 
 
 def test_request_serializes_agent_by_module_variable() -> None:
-    payload = json.loads(AgentRequest(prompt="answer this").to_json())
+    payload = json.loads(AgentRequest(prompt="answer this").model_dump_json())
     run_types = get_type_hints(AgentWorkflow.run)
 
     assert payload["agent_reference"] == f"{__name__}:test_agent"

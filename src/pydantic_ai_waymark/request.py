@@ -50,6 +50,3 @@ class AIRequestBase(BaseModel, Generic[AgentDependenciesT]):
             raise ValueError(f"request agent must be {expected!r}")
         self.agent_reference = expected
         return self
-
-    def to_json(self) -> str:
-        return self.model_dump_json()

@@ -129,8 +129,8 @@ the workflow input. `examples/support_agent.py` includes a complete union-based
 workflow that runs a support agent and an independent review agent concurrently.
 
 `AIRequestBase` also accepts `message_history`, `deps`, `model`,
-`conversation_id`, and `run_id`. Its `to_json()` representation includes the
-stable agent reference needed by the worker.
+`conversation_id`, and `run_id`. Its serialized representation includes the stable
+agent reference needed by the worker.
 
 ## Docker Compose example
 
