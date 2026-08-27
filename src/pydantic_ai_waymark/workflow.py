@@ -32,6 +32,11 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
         self,
         request: AIRequestT,
     ) -> AgentResult:
+        """Drive one agent request through graph transitions until it returns a result.
+
+        Concrete workflow entrypoints call this once per request; each iteration runs
+        the next graph node, stops on a final result, or dispatches its pending tools.
+        """
         transition: AgentTransition | None = None
         tool_results: list[ToolActionResult] = []
         while True:
@@ -54,6 +59,11 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
         transition: AgentTransition | None,
         tool_results: list[ToolActionResult],
     ) -> AgentTransition:
+        """Run the next replay-safe Pydantic AI graph node as a Waymark action.
+
+        ``run_agent`` calls this initially and after every tool batch, passing the
+        prior transition and results so the graph can return its next node or result.
+        """
         while True:
             try:
                 return await self.run_action(
@@ -81,6 +91,11 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
         agent_name: str,
         transition: PendingTransition,
     ) -> None:
+        """Reject a pending transition that contains approval-required tool calls.
+
+        ``run_agent`` calls this before dispatching every non-final transition;
+        transitions without approval requests pass through unchanged.
+        """
         if transition.approvals:
             await raise_approval_required(agent_name)
 
@@ -89,6 +104,11 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
         request: AIRequestT,
         transition: PendingTransition,
     ) -> list[ToolActionResult]:
+        """Execute one transition's tool calls in their required barrier order.
+
+        ``run_agent`` calls this after approval handling; ordinary calls run in
+        parallel segments while calls marked sequential run alone between segments.
+        """
         results: list[ToolActionResult] = []
         parallel_calls: list[ToolCall] = []
         for tool_call in transition.tool_calls:
@@ -119,6 +139,11 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
         transition: PendingTransition,
         tool_calls: list[ToolCall],
     ) -> list[ToolActionResult]:
+        """Execute one barrier-delimited group of parallelizable tool calls.
+
+        ``_handle_agent_tools`` calls this before each sequential call and after
+        the final call; singleton groups run directly and larger groups fan out.
+        """
         if len(tool_calls) == 1:
             result = await self._run_agent_tool_call(
                 request, transition, tool_calls[0]
@@ -140,6 +165,11 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
         transition: PendingTransition,
         tool_call: ToolCall,
     ) -> ToolActionResult:
+        """Dispatch one tool call through its configured durability boundary.
+
+        Tool handling calls this directly for sequential calls and through a segment
+        otherwise: workflow-native calls stay in workflow code, all others use actions.
+        """
         if tool_call.waymark is False:
             # metadata={"waymark": False}: execute deterministic, compileable
             # workflow code, such as asyncio.sleep(), outside an action.
@@ -201,7 +231,17 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
         tool_name: str,
         args: WorkflowToolArgs,
     ) -> ToolValue:
+        """Execute a tool explicitly registered with ``metadata={"waymark": False}``.
+
+        ``_run_agent_tool_call`` invokes this only for workflow-native calls; concrete
+        workflows override it to route supported names and may reject unknown names.
+        """
         return await self._unsupported_workflow_tool(agent_name, tool_name)
 
     async def _unsupported_workflow_tool(self, agent_name: str, tool_name: str) -> Never:
+        """Fail a workflow-native tool call that the concrete workflow cannot route.
+
+        The default ``run_workflow_tool`` calls this for every name; overrides can
+        use it as their fallback after handling their supported workflow-native tools.
+        """
         return await raise_workflow_tool_not_configured(agent_name, tool_name)
