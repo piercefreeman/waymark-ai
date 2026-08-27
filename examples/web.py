@@ -170,11 +170,7 @@ async def run_sleep(request: Request) -> HTMLResponse:
         )
 
     try:
-        reply = await SleepWorkflow().run(
-            SleepRequest(prompt="Simulate processing.", deps=deps)
-        )
+        reply = await SleepWorkflow().run(SleepRequest(prompt="Simulate processing.", deps=deps))
     except Exception as error:
-        return HTMLResponse(
-            page(sleep_seconds=seconds, sleep_error=str(error)), status_code=500
-        )
+        return HTMLResponse(page(sleep_seconds=seconds, sleep_error=str(error)), status_code=500)
     return HTMLResponse(page(sleep_seconds=seconds, sleep_answer=reply))

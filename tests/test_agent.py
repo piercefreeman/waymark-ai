@@ -653,9 +653,7 @@ def test_tool_can_request_a_durable_workflow_sleep() -> None:
 
     assert result == '{"pause":"waited"}'
     tool_ir = next(
-        fn
-        for fn in TestSleepWorkflow.workflow_ir().functions
-        if fn.name == "_run_agent_tool_call"
+        fn for fn in TestSleepWorkflow.workflow_ir().functions if fn.name == "_run_agent_tool_call"
     )
     tool_ir_text = str(tool_ir)
     assert "sleep_stmt" in tool_ir_text

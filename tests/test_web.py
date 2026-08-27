@@ -18,17 +18,13 @@ def test_form_runs_workflow(monkeypatch) -> None:
         [
             ModelResponse(
                 parts=[
-                    ToolCallPart(
-                        "lookup_support_policy", {"topic": "duplicate charge"}, "call-1"
-                    ),
+                    ToolCallPart("lookup_support_policy", {"topic": "duplicate charge"}, "call-1"),
                     ToolCallPart("final_result", {"answer": "done"}, "call-2"),
                 ]
             ),
             ModelRequest(
                 parts=[
-                    ToolReturnPart(
-                        "lookup_support_policy", "Escalate account access.", "call-1"
-                    )
+                    ToolReturnPart("lookup_support_policy", "Escalate account access.", "call-1")
                 ]
             ),
         ]
@@ -38,9 +34,7 @@ def test_form_runs_workflow(monkeypatch) -> None:
         assert request.prompt == "Why was I charged twice?"
         return AgentResult.model_validate(
             {
-                "output": SupportReply(
-                    answer="I found the duplicate charge.", needs_human=False
-                ),
+                "output": SupportReply(answer="I found the duplicate charge.", needs_human=False),
                 "message_history": history,
                 "new_messages": history,
                 "usage": {
@@ -70,7 +64,7 @@ def test_form_runs_workflow(monkeypatch) -> None:
     assert response.status_code == 200
     assert "I found the duplicate charge." in response.text
     assert "lookup_support_policy" in response.text
-    assert 'topic&quot;:&quot;duplicate charge' in response.text
+    assert "topic&quot;:&quot;duplicate charge" in response.text
     assert "Escalate account access." in response.text
     assert "final_result" not in response.text
     assert TestClient(web.app).post("/run", content="prompt=+").status_code == 422
