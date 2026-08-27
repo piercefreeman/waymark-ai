@@ -66,4 +66,5 @@ def wait_for_follow_up(seconds: float = 45) -> str:
 
 @workflow
 class SupportWorkflow(PydanticAIWorkflow[SupportRequest]):
-    pass
+    async def run(self, request: SupportRequest) -> SupportReply:
+        return (await self.run_agent(request)).output

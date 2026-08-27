@@ -97,8 +97,8 @@ Waymark worker can import the same agent reference.
 
 ## Compile the agent into a workflow
 
-Parameterize `PydanticAIWorkflow` with the request type. The inherited `run`
-method executes the configured agent and returns its output:
+Parameterize `PydanticAIWorkflow` with the request type, implement the Waymark
+entrypoint, and call `run_agent` from it:
 
 ```python
 from waymark import workflow
@@ -111,13 +111,19 @@ class SupportRequest(AIRequestBase[None]):
 
 @workflow
 class SupportWorkflow(PydanticAIWorkflow[SupportRequest]):
-    pass
+    async def run(self, request: SupportRequest) -> Reply:
+        return (await self.run_agent(request)).output
 
 
 reply = await SupportWorkflow().run(
     SupportRequest(prompt="How do I update my account?")
 )
 ```
+
+The request parameter may be a union such as
+`PydanticAIWorkflow[SupportRequest | SalesRequest]`. Each request's serialized
+agent reference selects the matching class-level `agent` when Waymark rebuilds
+the workflow input.
 
 `AIRequestBase` also accepts `message_history`, `deps`, `model`,
 `conversation_id`, and `run_id`. Its `to_json()` representation includes the

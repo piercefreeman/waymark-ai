@@ -1,6 +1,5 @@
 import asyncio
-from types import FunctionType
-from typing import Any, Generic, Never, TypeVar, cast, get_args, get_origin
+from typing import Any, Generic, Never, TypeVar
 
 from waymark import Workflow
 
@@ -14,7 +13,6 @@ from .actions import (
 )
 from .request import AIRequestBase
 from .types import (
-    AgentOutput,
     AgentResult,
     AgentTransition,
     PendingTransition,
@@ -29,36 +27,6 @@ AIRequestT = TypeVar("AIRequestT", bound=AIRequestBase[Any])
 
 class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
     """Workflow base that compiles Pydantic AI graph and tool transitions to actions."""
-
-    def __init_subclass__(cls, **kwargs: Any) -> None:
-        super().__init_subclass__(**kwargs)
-        if "run" in cls.__dict__:
-            return
-        request_type = next(
-            (
-                get_args(base)[0]
-                for base in getattr(cls, "__orig_bases__", ())
-                if get_origin(base) is PydanticAIWorkflow
-            ),
-            None,
-        )
-        output_type = getattr(getattr(request_type, "agent", None), "output_type", None)
-        if not isinstance(request_type, type) or not isinstance(output_type, type):
-            return
-
-        # Waymark uses run()'s concrete return annotation to rebuild Pydantic outputs.
-        run = FunctionType(
-            PydanticAIWorkflow.run.__code__,
-            PydanticAIWorkflow.run.__globals__,
-            name="run",
-        )
-        run.__annotations__ = {"request": request_type, "return": output_type}
-        run.__qualname__ = f"{cls.__qualname__}.run"
-        cls.run = cast(Any, run)
-
-    async def run(self, request: AIRequestT) -> AgentOutput:
-        result = await self.run_agent(request)
-        return result.output
 
     async def run_agent(
         self,

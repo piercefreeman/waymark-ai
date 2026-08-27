@@ -116,22 +116,32 @@ class ParallelRequest(AIRequestBase[None]):
 
 @workflow
 class AgentWorkflow(PydanticAIWorkflow[AgentRequest]):
-    pass
+    async def run(self, request: AgentRequest) -> Answer:
+        return (await self.run_agent(request)).output
 
 
 @workflow
 class ToolWorkflow(PydanticAIWorkflow[ToolRequest]):
-    pass
+    async def run(self, request: ToolRequest) -> str:
+        return (await self.run_agent(request)).output
 
 
 @workflow
 class SleepWorkflow(PydanticAIWorkflow[SleepRequest]):
-    pass
+    async def run(self, request: SleepRequest) -> str:
+        return (await self.run_agent(request)).output
 
 
 @workflow
 class ParallelWorkflow(PydanticAIWorkflow[ParallelRequest]):
-    pass
+    async def run(self, request: ParallelRequest) -> str:
+        return (await self.run_agent(request)).output
+
+
+@workflow
+class UnionWorkflow(PydanticAIWorkflow[AgentRequest | ToolRequest]):
+    async def run(self, request: AgentRequest | ToolRequest) -> Answer | str:
+        return (await self.run_agent(request)).output
 
 
 async def drive(agent_name: str) -> tuple[AgentResult, int]:
@@ -252,6 +262,16 @@ def test_request_serializes_agent_by_module_variable() -> None:
 
     assert payload["agent_reference"] == f"{__name__}:test_agent"
     assert run_types == {"request": AgentRequest, "return": Answer}
+    assert "run" not in PydanticAIWorkflow.__dict__
+
+
+def test_union_request_routes_to_its_declared_agent() -> None:
+    tool_calls.clear()
+
+    result = asyncio.run(UnionWorkflow().run(ToolRequest(prompt="answer this")))
+
+    assert result == '{"lookup":"found"}'
+    assert tool_calls == ["a"]
 
 
 def test_factory_requires_a_name() -> None:
