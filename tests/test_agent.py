@@ -8,6 +8,7 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel, ValidationError
 from pydantic_ai import Agent, ModelMessagesTypeAdapter
 from pydantic_ai.exceptions import ModelAPIError, ModelRetry
+from pydantic_ai.messages import BinaryImage, ToolReturn
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.providers.openai import OpenAIProvider
@@ -24,6 +25,7 @@ from pydantic_ai_waymark import (
     run_agent_tool,
     waymark_agent,
 )
+from pydantic_ai_waymark.serialization import deferred_results
 
 
 @pytest.fixture(autouse=True)
@@ -348,6 +350,27 @@ def test_tool_round_trip_resumes_across_graph_node_actions() -> None:
     assert result.usage.requests == 2
     assert tool_calls == ["a"]
     assert step_count == 6
+
+
+def test_serialized_tool_images_are_rehydrated_before_resuming_agent() -> None:
+    result = deferred_results(
+        [
+            {
+                "kind": "return",
+                "tool_call_id": "image-call",
+                "tool_name": "render",
+                "value": {
+                    "kind": "binary",
+                    "data": "aW1hZ2UgYnl0ZXM=",
+                    "media_type": "image/png",
+                },
+            }
+        ]
+    )["image-call"]
+
+    assert isinstance(result, ToolReturn)
+    assert isinstance(result.return_value, BinaryImage)
+    assert result.return_value.data == b"image bytes"
 
 
 def test_waymark_executes_compiled_agent_state_machine() -> None:
