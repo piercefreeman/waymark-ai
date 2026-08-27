@@ -1,27 +1,44 @@
 # pydantic-ai-waymark
 
-Run a Pydantic AI agent as a compiled, durable
-[Waymark](https://github.com/piercefreeman/waymark) state machine.
+AI agents are outgrowing the request-response cycle. They increasingly run for
+days, weeks, or months. Some of that is active work, but much of it is waiting:
+for a user to approve an action, for another system to respond, or for a
+two-week onboarding period to end. An agent should not have to stay in memory
+and occupy a worker through those gaps. Over that lifetime, workers will
+restart, code will be deployed, and temporary failures will happen.
 
-Build agents that can run reliably for days, weeks, or years. The compilation
-layer turns Pydantic AI control flow into an efficient Waymark state machine, so
-an agent can persist its progress, sleep without occupying a worker, and wake at
-the right time to continue from its last completed step.
+Saving the current step in a database is easy. The harder part is making the
+whole control loop reliable: recording which model and tool actions completed,
+applying retries and timeouts at the right boundaries, scheduling durable
+timers, and resuming the right run after a restart. Queues, schedulers, and
+state tables can solve each piece, but stitching them together becomes an
+orchestration system embedded in every agent.
+
+This is what durable execution provides. [Waymark](https://github.com/piercefreeman/waymark)
+compiles ordinary Python control flow into a durable state machine, checkpoints
+progress at action boundaries, and stores waits instead of holding a live
+process. Workers can come and go while the workflow continues from its last
+completed step.
+
+Waymark solves that problem for general Python workflows. `pydantic-ai-waymark`
+applies it to Pydantic AI agents: keep the model, tools, retries, timeouts, and
+low-level control you already have while Waymark handles persistence, wakeups,
+and scalable orchestration. It is more infrastructure than a short, one-shot
+agent needs; it earns its keep when the agent must outlive the process running
+it.
 
 ## Install
 
-The project and lockfile are controlled by [uv](https://docs.astral.sh/uv/):
+Add the package to your project from PyPI:
 
 ```bash
-uv sync
+uv add pydantic-ai-waymark
 ```
 
-The project uses the latest Waymark `0.30` development release.
-
-Install the provider used by the example:
+Include the OpenAI provider used by the example with the `openai` extra:
 
 ```bash
-uv sync --extra openai
+uv add "pydantic-ai-waymark[openai]"
 ```
 
 ## Define an agent
