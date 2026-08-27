@@ -123,7 +123,8 @@ reply = await SupportWorkflow().run(
 The request parameter may be a union such as
 `PydanticAIWorkflow[SupportRequest | SalesRequest]`. Each request's serialized
 agent reference selects the matching class-level `agent` when Waymark rebuilds
-the workflow input.
+the workflow input. `examples/support_agent.py` includes a complete union-based
+workflow that runs a support agent and an independent review agent concurrently.
 
 `AIRequestBase` also accepts `message_history`, `deps`, `model`,
 `conversation_id`, and `run_id`. Its `to_json()` representation includes the

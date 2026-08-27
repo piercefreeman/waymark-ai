@@ -1,8 +1,11 @@
+import asyncio
+
 from pydantic import BaseModel
 from pydantic_ai import Agent
-from waymark import workflow
+from waymark import action, workflow
 
 from pydantic_ai_waymark import (
+    AgentResult,
     AIRequestBase,
     DurableSleep,
     PydanticAIWorkflow,
@@ -13,6 +16,16 @@ from pydantic_ai_waymark import (
 class SupportReply(BaseModel):
     answer: str
     needs_human: bool
+
+
+class ReviewReply(BaseModel):
+    summary: str
+    concerns: list[str]
+
+
+class ParallelSupportReply(BaseModel):
+    support: SupportReply
+    review: ReviewReply
 
 
 support_agent = waymark_agent(
@@ -29,9 +42,25 @@ support_agent = waymark_agent(
     )
 )
 
+review_agent = waymark_agent(
+    Agent(
+        "openai:gpt-5.2",
+        name="review_agent",
+        instructions=(
+            "Independently review the support request for safety, policy, and escalation risks."
+        ),
+        output_type=ReviewReply,
+        defer_model_check=True,
+    )
+)
+
 
 class SupportRequest(AIRequestBase[None]):
     agent = support_agent
+
+
+class ReviewRequest(AIRequestBase[None]):
+    agent = review_agent
 
 
 @support_agent.tool_plain
@@ -68,3 +97,33 @@ def wait_for_follow_up(seconds: float = 45) -> str:
 class SupportWorkflow(PydanticAIWorkflow[SupportRequest]):
     async def run(self, request: SupportRequest) -> SupportReply:
         return (await self.run_agent(request)).output
+
+
+@action
+async def combine_parallel_support_results(
+    results: tuple[object, object],
+) -> ParallelSupportReply:
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
+    support_result = AgentResult.model_validate(results[0])
+    review_result = AgentResult.model_validate(results[1])
+    return ParallelSupportReply(
+        support=SupportReply.model_validate(support_result.output),
+        review=ReviewReply.model_validate(review_result.output),
+    )
+
+
+@workflow
+class ParallelSupportWorkflow(PydanticAIWorkflow[SupportRequest | ReviewRequest]):
+    async def run(
+        self,
+        support_request: SupportRequest,
+        review_request: ReviewRequest,
+    ) -> ParallelSupportReply:
+        results: tuple[object, object] = await asyncio.gather(
+            self.run_agent(support_request),
+            self.run_agent(review_request),
+            return_exceptions=True,
+        )
+        return await combine_parallel_support_results(results)
