@@ -55,6 +55,9 @@ tool_metadata_adapter = TypeAdapter(dict[str, JsonValue])
 
 def _pending_tool_call(call: ToolCallPart, metadata: Mapping[str, object]) -> ToolCall:
     policy = metadata.get("waymark")
+    sequential = metadata.get("waymark_sequential", False)
+    if not isinstance(sequential, bool):
+        raise RuntimeError(f"tool {call.tool_name!r} has an invalid sequential flag")
     if policy is False:
         workflow_args = metadata.get("waymark_args")
         if not isinstance(workflow_args, dict):
@@ -63,6 +66,7 @@ def _pending_tool_call(call: ToolCallPart, metadata: Mapping[str, object]) -> To
             call=dump_tool_call(call),
             waymark=False,
             workflow_args=cast(WorkflowToolArgs, workflow_args),
+            sequential=sequential,
         )
     if policy is None:
         raise RuntimeError(f"tool {call.tool_name!r} has no Waymark action policy")
@@ -70,6 +74,7 @@ def _pending_tool_call(call: ToolCallPart, metadata: Mapping[str, object]) -> To
         call=dump_tool_call(call),
         waymark=WaymarkToolPolicy.model_validate(policy),
         workflow_args=None,
+        sequential=sequential,
     )
 
 
@@ -142,7 +147,7 @@ async def run_agent_node(
                 remaining = {
                     key: value
                     for key, value in metadata.items()
-                    if key not in {"waymark", "waymark_args"}
+                    if key not in {"waymark", "waymark_args", "waymark_sequential"}
                 }
                 if remaining:
                     tool_metadata[tool_call_id] = tool_metadata_adapter.validate_python(
@@ -274,6 +279,16 @@ async def run_agent_tool(
 @action(name="pydantic_ai_agent_tool_attempts_exhausted")
 async def raise_tool_attempts_exhausted(tool_name: str, attempts: int) -> Never:
     raise RuntimeError(f"tool {tool_name!r} failed after {attempts} Waymark attempts")
+
+
+@action(name="pydantic_ai_parallel_tool_results")
+async def resolve_parallel_tool_results(
+    results: list[object],
+) -> list[ToolActionResult]:
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
+    return cast(list[ToolActionResult], results)
 
 
 @action(name="pydantic_ai_workflow_tool_not_configured")

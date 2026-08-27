@@ -46,6 +46,13 @@ tool_calls: list[str] = []
 tool_failures = [0]
 tool_agent = waymark_agent(Agent(TestModel(call_tools=["lookup"]), name="tool_agent"))
 sleep_agent = waymark_agent(Agent(TestModel(call_tools=["pause"]), name="sleep_agent"))
+parallel_events: list[str] = []
+parallel_agent = waymark_agent(
+    Agent(
+        TestModel(call_tools=["before_a", "before_b", "barrier", "after"]),
+        name="parallel_agent",
+    )
+)
 
 
 @tool_agent.tool_plain(
@@ -64,6 +71,33 @@ def pause() -> str:
     raise DurableSleep(0.001, result="waited")
 
 
+async def record_tool(name: str) -> str:
+    parallel_events.append(f"{name}:start")
+    await asyncio.sleep(0.01)
+    parallel_events.append(f"{name}:end")
+    return name
+
+
+@parallel_agent.tool_plain
+async def before_a() -> str:
+    return await record_tool("before_a")
+
+
+@parallel_agent.tool_plain
+async def before_b() -> str:
+    return await record_tool("before_b")
+
+
+@parallel_agent.tool_plain(sequential=True)
+async def barrier() -> str:
+    return await record_tool("barrier")
+
+
+@parallel_agent.tool_plain
+async def after() -> str:
+    return await record_tool("after")
+
+
 class AgentRequest(AIRequestBase[None]):
     agent = test_agent
 
@@ -74,6 +108,10 @@ class ToolRequest(AIRequestBase[None]):
 
 class SleepRequest(AIRequestBase[None]):
     agent = sleep_agent
+
+
+class ParallelRequest(AIRequestBase[None]):
+    agent = parallel_agent
 
 
 @workflow
@@ -88,6 +126,11 @@ class ToolWorkflow(PydanticAIWorkflow[ToolRequest]):
 
 @workflow
 class SleepWorkflow(PydanticAIWorkflow[SleepRequest]):
+    pass
+
+
+@workflow
+class ParallelWorkflow(PydanticAIWorkflow[ParallelRequest]):
     pass
 
 
@@ -183,6 +226,24 @@ def test_tool_can_request_a_durable_workflow_sleep() -> None:
     tool_ir_text = str(tool_ir)
     assert "sleep_stmt" in tool_ir_text
     assert 'name: "sleep_seconds"' in tool_ir_text
+
+
+def test_tools_parallelize_around_sequential_barriers() -> None:
+    parallel_events.clear()
+
+    asyncio.run(ParallelWorkflow().run(ParallelRequest(prompt="run tools")))
+
+    parallel_ir = next(
+        fn
+        for fn in ParallelWorkflow.workflow_ir().functions
+        if fn.name == "_run_agent_tool_segment"
+    )
+    assert "spread_expr" in str(parallel_ir)
+    assert parallel_events.index("barrier:start") > max(
+        parallel_events.index("before_a:end"),
+        parallel_events.index("before_b:end"),
+    )
+    assert parallel_events.index("after:start") > parallel_events.index("barrier:end")
 
 
 def test_request_serializes_agent_by_module_variable() -> None:

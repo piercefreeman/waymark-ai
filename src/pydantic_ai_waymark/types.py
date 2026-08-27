@@ -78,6 +78,7 @@ class ToolCall(WireModel):
     call: SerializedToolCall
     waymark: WaymarkToolPolicy | Literal[False]
     workflow_args: WorkflowToolArgs | None
+    sequential: bool = False
 
     @model_validator(mode="after")
     def validate_dispatch(self) -> Self:

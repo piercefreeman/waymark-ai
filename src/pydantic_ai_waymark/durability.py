@@ -79,7 +79,10 @@ class WaymarkToolBoundary(AbstractCapability[AgentDeps]):
     ) -> Never:
         del ctx, call, handler
         policy = _tool_policy(tool_def)
-        metadata: dict[str, object] = {"waymark": policy}
+        metadata: dict[str, object] = {
+            "waymark": policy,
+            "waymark_sequential": tool_def.sequential,
+        }
         if policy is False:
             metadata["waymark_args"] = workflow_args_adapter.dump_python(args, mode="json")
         raise CallDeferred(metadata=metadata)

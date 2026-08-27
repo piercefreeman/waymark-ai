@@ -74,6 +74,10 @@ def lookup_policy(topic: str) -> str:
 These values control Waymark action attempts. Pydantic AI's `retries=` and
 `timeout=` arguments remain model-facing tool retry settings.
 
+Tools run in parallel by default. Pydantic AI's `sequential=True` flag is a
+barrier: earlier tools finish first, the sequential tool runs alone, and later
+tools start only after it finishes.
+
 To let a tool request a durable wait, raise `DurableSleep`. The tool action
 records the request, the workflow performs the timer, and the supplied result
 is returned to the model under the original tool-call ID:

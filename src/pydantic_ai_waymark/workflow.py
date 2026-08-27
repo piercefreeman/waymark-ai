@@ -8,6 +8,7 @@ from .actions import (
     raise_approval_required,
     raise_tool_attempts_exhausted,
     raise_workflow_tool_not_configured,
+    resolve_parallel_tool_results,
     run_agent_node,
     run_agent_tool,
 )
@@ -117,14 +118,48 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
         transition: PendingTransition,
     ) -> list[ToolActionResult]:
         results: list[ToolActionResult] = []
+        parallel_calls: list[ToolCall] = []
         for tool_call in transition.tool_calls:
-            results.append(
-                await self._run_agent_tool_call(
-                    request,
-                    transition,
-                    tool_call,
+            if tool_call.sequential:
+                if parallel_calls:
+                    parallel_results = await self._run_agent_tool_segment(
+                        request, transition, parallel_calls
+                    )
+                    for parallel_result in parallel_results:
+                        results.append(parallel_result)
+                    parallel_calls = []
+                results.append(
+                    await self._run_agent_tool_call(request, transition, tool_call)
                 )
+            else:
+                parallel_calls.append(tool_call)
+        if parallel_calls:
+            parallel_results = await self._run_agent_tool_segment(
+                request, transition, parallel_calls
             )
+            for parallel_result in parallel_results:
+                results.append(parallel_result)
+        return results
+
+    async def _run_agent_tool_segment(
+        self,
+        request: AIRequestT,
+        transition: PendingTransition,
+        tool_calls: list[ToolCall],
+    ) -> list[ToolActionResult]:
+        if len(tool_calls) == 1:
+            result = await self._run_agent_tool_call(
+                request, transition, tool_calls[0]
+            )
+            return [result]
+        gathered: list[object] = await asyncio.gather(
+            *[
+                self._run_agent_tool_call(request, transition, tool_call)
+                for tool_call in tool_calls
+            ],
+            return_exceptions=True,
+        )
+        results = await resolve_parallel_tool_results(gathered)
         return results
 
     async def _run_agent_tool_call(
