@@ -144,9 +144,7 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
                     for parallel_result in parallel_results:
                         results.append(parallel_result)
                     parallel_calls = []
-                results.append(
-                    await self._run_agent_tool_call(request, transition, tool_call)
-                )
+                results.append(await self._run_agent_tool_call(request, transition, tool_call))
             else:
                 parallel_calls.append(tool_call)
         if parallel_calls:
@@ -169,9 +167,7 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
         the final call; singleton groups run directly and larger groups fan out.
         """
         if len(tool_calls) == 1:
-            result = await self._run_agent_tool_call(
-                request, transition, tool_calls[0]
-            )
+            result = await self._run_agent_tool_call(request, transition, tool_calls[0])
             return [result]
         gathered: list[object] = await asyncio.gather(
             *[

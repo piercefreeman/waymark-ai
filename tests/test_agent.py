@@ -26,6 +26,18 @@ from pydantic_ai_waymark import (
 )
 
 
+@pytest.fixture(autouse=True)
+def reset_mutable_test_state() -> None:
+    planning_failures[0] = 0
+    planning_failure_kind[0] = "transient"
+    planning_calls.clear()
+    tool_failures[0] = 0
+    tool_failure_kind[0] = "retry"
+    tool_calls.clear()
+    approval_calls.clear()
+    timeout_calls.clear()
+
+
 class Answer(BaseModel):
     value: str
 
@@ -52,6 +64,7 @@ def transient_planning() -> str:
         raise RuntimeError("transient planning failure")
     return "Answer the request."
 
+
 tool_calls: list[str] = []
 tool_failures = [0]
 tool_failure_kind = ["retry"]
@@ -77,9 +90,7 @@ http_agent = waymark_agent(
 approval_agent = waymark_agent(
     Agent(TestModel(call_tools=["delete_record"]), name="approval_agent")
 )
-timeout_agent = waymark_agent(
-    Agent(TestModel(call_tools=["slow_tool"]), name="timeout_agent")
-)
+timeout_agent = waymark_agent(Agent(TestModel(call_tools=["slow_tool"]), name="timeout_agent"))
 approval_calls: list[str] = []
 timeout_calls: list[str] = []
 
@@ -238,18 +249,6 @@ OPENAI_RESPONSE = {
 }
 
 
-@pytest.fixture(autouse=True)
-def reset_mutable_test_state() -> None:
-    planning_failures[0] = 0
-    planning_failure_kind[0] = "transient"
-    planning_calls.clear()
-    tool_failures[0] = 0
-    tool_failure_kind[0] = "retry"
-    tool_calls.clear()
-    approval_calls.clear()
-    timeout_calls.clear()
-
-
 async def drive(agent_name: str) -> tuple[AgentResult, int]:
     transition = None
     tool_results = []
@@ -265,8 +264,7 @@ async def drive(agent_name: str) -> tuple[AgentResult, int]:
         if transition.kind == "done":
             return transition.result, step_count
         tool_results = [
-            await run_agent_tool(agent_name, transition, call)
-            for call in transition.tool_calls
+            await run_agent_tool(agent_name, transition, call) for call in transition.tool_calls
         ]
     raise AssertionError("agent did not finish")
 

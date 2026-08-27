@@ -80,9 +80,7 @@ async def run_agent_node(
         raise RuntimeError("a completed agent transition cannot be resumed")
     agent = registered_agent(agent_name)
     restored_state = (
-        state_adapter.validate_json(transition.state)
-        if transition is not None
-        else None
+        state_adapter.validate_json(transition.state) if transition is not None else None
     )
     history = (
         restored_state.message_history
@@ -128,9 +126,7 @@ async def run_agent_node(
                 if result["kind"] in {"retry_prompt", "model_retry"}:
                     agent_run.ctx.deps.tool_manager.failed_tools.add(result["tool_name"])
                 elif result["kind"] == "return":
-                    agent_run.ctx.deps.tool_manager.succeeded_tools.add(
-                        result["tool_name"]
-                    )
+                    agent_run.ctx.deps.tool_manager.succeeded_tools.add(result["tool_name"])
 
         try:
             next_node = await agent_run.next(node)
@@ -138,9 +134,7 @@ async def run_agent_node(
             tool_metadata: ToolMetadata = {}
             for tool_call_id, metadata in pending.requests.metadata.items():
                 if metadata:
-                    tool_metadata[tool_call_id] = tool_metadata_adapter.validate_python(
-                        metadata
-                    )
+                    tool_metadata[tool_call_id] = tool_metadata_adapter.validate_python(metadata)
             return ToolsTransition(
                 kind="tools",
                 state=state_adapter.dump_json(agent_run.ctx.state).decode(),
@@ -267,6 +261,7 @@ async def run_agent_tool(
             "tool_name": call.tool_name,
             "value": value,
         }
+
 
 @action(name="pydantic_ai_agent_model_attempts_exhausted")
 async def raise_model_attempts_exhausted(attempts: int) -> Never:

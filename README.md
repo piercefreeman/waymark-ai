@@ -52,50 +52,11 @@ support_agent = waymark_agent(
 )
 
 
-class SupportRequest(AIRequestBase[None]):
-    agent = support_agent
-
-
 @support_agent.tool_plain
 def lookup_policy(topic: str) -> str:
     """Look up the support policy for a topic."""
     return f"Policy for {topic}: escalate account changes."
 ```
-
-Use Pydantic AI's existing retry and timeout settings as usual:
-
-```python
-@support_agent.tool_plain(
-    retries=3,
-    timeout=120,
-)
-def lookup_policy(topic: str) -> str:
-    return f"Policy for {topic}: escalate account changes."
-```
-
-Timeouts and `ModelRetry` responses follow Pydantic AI's retry flow across
-durable Waymark actions. Other exceptions fail the workflow immediately.
-
-Tools run in parallel by default. Pydantic AI's `sequential=True` flag is a
-barrier: earlier tools finish first, the sequential tool runs alone, and later
-tools start only after it finishes.
-
-To let a tool request a durable wait, raise `DurableSleep`. The tool action
-records the request, the workflow performs the timer, and the supplied result
-is returned to the model under the original tool-call ID:
-
-```python
-from pydantic_ai_waymark import DurableSleep
-
-
-@support_agent.tool_plain
-def wait_for_follow_up(seconds: float = 45) -> str:
-    raise DurableSleep(seconds, result="Follow-up wait completed.")
-```
-
-The request serializes the agent as its module and variable name, not as a live
-Python object. Define the agent, request, and workflow at module scope so every
-Waymark worker can import the same agent reference.
 
 ## Compile the agent into a workflow
 
@@ -123,14 +84,96 @@ reply = await SupportWorkflow().run(
 ```
 
 The request parameter may be a union such as
-`PydanticAIWorkflow[SupportRequest | SalesRequest]`. Each request's serialized
-agent reference selects the matching class-level `agent` when Waymark rebuilds
-the workflow input. `examples/support_agent.py` includes a complete union-based
-workflow that runs a support agent and an independent review agent concurrently.
+`PydanticAIWorkflow[SupportRequest | SalesRequest]`. This simply acts as a typehint
+for the run_agent function. You can similarly nest these values within a large request blob:
+
+```python
+class Agent1Request(APIRequestBase[None]):
+    agent = agent_1
+
+class Agent2Request(APIRequestBase[None]):
+    agent = agent_2
+
+class MainRequest(BaseModel):
+    request_1: Agent1Request
+    request_2: Agent2Request
+
+@workflow
+class MultiAgentWorkflow(PydanticAIWorkflow[Agent1Request | Agent2Request]):
+    async def run(self, request: MainRequest) -> None:
+        response_1 = await self.run_agent(request.request_1)
+        response_2 = await self.run_agent(request.request_2)
+
+reply = await MultiAgentWorkflow().run(
+    MainRequest(
+        request_1=SupportRequest(prompt="What's your name?")
+        request_2=SupportRequest(prompt="What's your name?")
+    )
+)
+```
 
 `AIRequestBase` also accepts `message_history`, `deps`, `model`,
 `conversation_id`, and `run_id`. Its serialized representation includes the stable
 agent reference needed by the worker.
+
+## Extras
+
+We make our best effort to wrap `pydantic-ai`'s features 1:1 - just with the addition of the magic of durable execution. For instance, you can use Pydantic AI's existing retry and timeout settings as usual:
+
+```python
+@support_agent.tool_plain(
+    retries=3,
+    timeout=120,
+)
+def lookup_policy(topic: str) -> str:
+    return f"Policy for {topic}: escalate account changes."
+```
+
+Timeouts and `ModelRetry` responses follow Pydantic AI's retry flow across
+durable Waymark actions. Other exceptions fail the workflow immediately.
+
+Tools run in parallel by default. Mark a tool as sequential when it must run
+alone:
+
+```python
+@support_agent.tool_plain
+async def read_profile() -> str:
+    return "Profile loaded."
+
+
+@support_agent.tool_plain(sequential=True)
+async def update_account() -> str:
+    return "Account updated."
+
+
+@support_agent.tool_plain
+async def send_confirmation() -> str:
+    return "Confirmation sent."
+```
+
+`sequential=True` acts as a barrier. If the model calls `read_profile`,
+`lookup_policy`, `update_account`, and `send_confirmation` in that order,
+Waymark resolves them as follows:
+
+1. `read_profile` and `lookup_policy` run in parallel.
+2. `update_account` runs alone after both finish.
+3. `send_confirmation` starts after `update_account` finishes.
+
+Calls after the barrier can run in parallel again until the next sequential
+tool call.
+
+To let a tool request a durable wait, raise `DurableSleep`. The tool action
+records the request, the workflow performs the timer, and the supplied result
+is returned to the model under the original tool-call ID:
+
+```python
+from pydantic_ai_waymark import DurableSleep
+
+
+@support_agent.tool_plain
+def wait_for_follow_up(seconds: float = 45) -> str:
+    raise DurableSleep(seconds, result="Follow-up wait completed.")
+```
 
 ## Docker Compose example
 
