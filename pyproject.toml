@@ -21,7 +21,9 @@ web = ["fastapi>=0.116,<1", "uvicorn>=0.35,<1"]
 dev = [
   "fastapi>=0.116,<1",
   "httpx>=0.28,<1",
+  "pydantic-ai-slim[openai]>=2.21,<2.22",
   "pytest>=8",
+  "pytest-httpx>=0.36.2",
   "ruff>=0.12",
   "ty>=0.0.1a26",
 ]

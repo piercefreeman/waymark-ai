@@ -2,11 +2,16 @@ import asyncio
 import json
 from typing import get_type_hints
 
+import httpx
 import pytest
-from pydantic import BaseModel
+from openai import AsyncOpenAI
+from pydantic import BaseModel, ValidationError
 from pydantic_ai import Agent, ModelMessagesTypeAdapter
 from pydantic_ai.exceptions import ModelAPIError
+from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.providers.openai import OpenAIProvider
+from pytest_httpx import HTTPXMock
 from waymark import workflow
 
 from pydantic_ai_waymark import (
@@ -58,6 +63,28 @@ parallel_agent = waymark_agent(
         name="parallel_agent",
     )
 )
+openai_client = AsyncOpenAI(api_key="test", max_retries=0)
+http_agent = waymark_agent(
+    Agent(
+        OpenAIChatModel(
+            "gpt-4o-mini",
+            provider=OpenAIProvider(openai_client=openai_client),
+        ),
+        name="http_agent",
+    )
+)
+approval_agent = waymark_agent(
+    Agent(TestModel(call_tools=["delete_record"]), name="approval_agent")
+)
+unsupported_metadata_agent = waymark_agent(
+    Agent(TestModel(call_tools=["unsupported_metadata"]), name="unsupported_metadata_agent")
+)
+timeout_agent = waymark_agent(
+    Agent(TestModel(call_tools=["slow_tool"]), name="timeout_agent")
+)
+approval_calls: list[str] = []
+unsupported_metadata_calls: list[str] = []
+timeout_calls: list[str] = []
 
 
 @tool_agent.tool_plain(
@@ -103,6 +130,27 @@ async def after() -> str:
     return await record_tool("after")
 
 
+@approval_agent.tool_plain(requires_approval=True)
+def delete_record() -> str:
+    approval_calls.append("called")
+    return "deleted"
+
+
+@unsupported_metadata_agent.tool_plain(metadata={"waymark": False})
+def unsupported_metadata() -> str:
+    unsupported_metadata_calls.append("called")
+    return "unsupported"
+
+
+@timeout_agent.tool_plain(
+    metadata={"waymark": {"attempts": 2, "backoff_seconds": 0, "timeout": 0.001}}
+)
+async def slow_tool() -> str:
+    timeout_calls.append("called")
+    await asyncio.sleep(0.01)
+    return "slow"
+
+
 class AgentRequest(AIRequestBase[None]):
     agent = test_agent
 
@@ -117,6 +165,22 @@ class SleepRequest(AIRequestBase[None]):
 
 class ParallelRequest(AIRequestBase[None]):
     agent = parallel_agent
+
+
+class HttpRequest(AIRequestBase[None]):
+    agent = http_agent
+
+
+class ApprovalRequest(AIRequestBase[None]):
+    agent = approval_agent
+
+
+class UnsupportedMetadataRequest(AIRequestBase[None]):
+    agent = unsupported_metadata_agent
+
+
+class TimeoutRequest(AIRequestBase[None]):
+    agent = timeout_agent
 
 
 @workflow
@@ -144,9 +208,62 @@ class ParallelWorkflow(PydanticAIWorkflow[ParallelRequest]):
 
 
 @workflow
+class HttpWorkflow(PydanticAIWorkflow[HttpRequest]):
+    async def run(self, request: HttpRequest) -> str:
+        return (await self.run_agent(request)).output
+
+
+@workflow
+class ApprovalWorkflow(PydanticAIWorkflow[ApprovalRequest]):
+    async def run(self, request: ApprovalRequest) -> str:
+        return (await self.run_agent(request)).output
+
+
+@workflow
+class UnsupportedMetadataWorkflow(PydanticAIWorkflow[UnsupportedMetadataRequest]):
+    async def run(self, request: UnsupportedMetadataRequest) -> str:
+        return (await self.run_agent(request)).output
+
+
+@workflow
+class TimeoutWorkflow(PydanticAIWorkflow[TimeoutRequest]):
+    async def run(self, request: TimeoutRequest) -> str:
+        return (await self.run_agent(request)).output
+
+
+@workflow
 class UnionWorkflow(PydanticAIWorkflow[AgentRequest | ToolRequest]):
     async def run(self, request: AgentRequest | ToolRequest) -> Answer | str:
         return (await self.run_agent(request)).output
+
+
+OPENAI_URL = "https://api.openai.com/v1/chat/completions"
+OPENAI_RESPONSE = {
+    "id": "chatcmpl-test",
+    "object": "chat.completion",
+    "created": 1,
+    "model": "gpt-4o-mini",
+    "choices": [
+        {
+            "index": 0,
+            "message": {"role": "assistant", "content": "provider durable"},
+            "finish_reason": "stop",
+        }
+    ],
+    "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+}
+
+
+@pytest.fixture(autouse=True)
+def reset_mutable_test_state() -> None:
+    planning_failures[0] = 0
+    planning_failure_kind[0] = "transient"
+    planning_calls.clear()
+    tool_failures[0] = 0
+    tool_calls.clear()
+    approval_calls.clear()
+    unsupported_metadata_calls.clear()
+    timeout_calls.clear()
 
 
 async def drive(agent_name: str) -> tuple[AgentResult, int]:
@@ -231,7 +348,6 @@ def test_permanent_planning_failure_is_not_retried() -> None:
 
 
 def test_model_retry_attempts_and_backoff_are_bounded() -> None:
-    planning_calls.clear()
     planning_failures[0] = 3
     planning_failure_kind[0] = "transient"
     config = BackoffConfig(
@@ -251,10 +367,114 @@ def test_model_retry_attempts_and_backoff_are_bounded() -> None:
             )
         )
 
-    planning_failures[0] = 0
     assert planning_calls == ["called", "called"]
     assert asyncio.run(AgentWorkflow()._model_retry_backoff_seconds(config, 1)) == 2
     assert asyncio.run(AgentWorkflow()._model_retry_backoff_seconds(config, 2)) == 5
+
+
+@pytest.mark.parametrize("status_code", [408, 409, 429, 500, 503])
+def test_retryable_openai_http_errors_rerun_the_graph_action(
+    httpx_mock: HTTPXMock,
+    status_code: int,
+) -> None:
+    httpx_mock.add_response(
+        status_code=status_code,
+        json={"error": {"message": "temporary", "type": "server_error"}},
+        url=OPENAI_URL,
+    )
+    httpx_mock.add_response(status_code=200, json=OPENAI_RESPONSE, url=OPENAI_URL)
+
+    result = asyncio.run(
+        HttpWorkflow().run(
+            HttpRequest(
+                prompt="answer this",
+                model_retry=BackoffConfig(initial_seconds=0, max_seconds=0),
+            )
+        )
+    )
+
+    assert result == "provider durable"
+    assert len(httpx_mock.get_requests()) == 2
+
+
+@pytest.mark.parametrize("status_code", [400, 401, 403, 404, 422])
+def test_permanent_openai_http_errors_fail_without_adapter_retry(
+    httpx_mock: HTTPXMock,
+    status_code: int,
+) -> None:
+    httpx_mock.add_response(
+        status_code=status_code,
+        json={"error": {"message": "permanent", "type": "invalid_request_error"}},
+        url=OPENAI_URL,
+    )
+
+    with pytest.raises(RuntimeError, match=rf"status_code: {status_code}"):
+        asyncio.run(HttpWorkflow().run(HttpRequest(prompt="answer this")))
+
+    assert len(httpx_mock.get_requests()) == 1
+
+
+@pytest.mark.parametrize(
+    "transport_error",
+    [httpx.ConnectError("offline"), httpx.ReadTimeout("timed out")],
+    ids=["connect", "timeout"],
+)
+def test_openai_transport_errors_are_retryable(
+    httpx_mock: HTTPXMock,
+    transport_error: httpx.HTTPError,
+) -> None:
+    httpx_mock.add_exception(transport_error, url=OPENAI_URL)
+    httpx_mock.add_response(status_code=200, json=OPENAI_RESPONSE, url=OPENAI_URL)
+
+    result = asyncio.run(
+        HttpWorkflow().run(
+            HttpRequest(
+                prompt="answer this",
+                model_retry=BackoffConfig(initial_seconds=0, max_seconds=0),
+            )
+        )
+    )
+
+    assert result == "provider durable"
+    assert len(httpx_mock.get_requests()) == 2
+
+
+def test_retryable_openai_errors_stop_at_configured_attempts(
+    httpx_mock: HTTPXMock,
+) -> None:
+    for _ in range(2):
+        httpx_mock.add_response(
+            status_code=429,
+            json={"error": {"message": "rate limited", "type": "rate_limit_error"}},
+            url=OPENAI_URL,
+        )
+
+    with pytest.raises(RuntimeError, match="failed after 2 transient attempts"):
+        asyncio.run(
+            HttpWorkflow().run(
+                HttpRequest(
+                    prompt="answer this",
+                    model_retry=BackoffConfig(
+                        attempts=2,
+                        initial_seconds=0,
+                        max_seconds=0,
+                    ),
+                )
+            )
+        )
+
+    assert len(httpx_mock.get_requests()) == 2
+
+
+def test_model_retry_control_flow_is_compiled_into_waymark_ir() -> None:
+    retry_ir = next(
+        fn for fn in HttpWorkflow.workflow_ir().functions if fn.name == "_next_agent_transition"
+    )
+    retry_ir_text = str(retry_ir)
+
+    assert 'exception_types: "RetryableAgentError"' in retry_ir_text
+    assert 'action_name: "pydantic_ai_agent_model_attempts_exhausted"' in retry_ir_text
+    assert "sleep_stmt" in retry_ir_text
 
 
 def test_waymark_executes_each_tool_as_its_own_action() -> None:
@@ -268,13 +488,37 @@ def test_waymark_executes_each_tool_as_its_own_action() -> None:
 
 
 def test_tool_action_policy_comes_from_tool_metadata() -> None:
-    tool_calls.clear()
     tool_failures[0] = 1
 
     result = asyncio.run(ToolWorkflow().run(ToolRequest(prompt="answer this")))
 
     assert result == '{"lookup":"found"}'
     assert tool_calls == ["a", "a"]
+
+
+def test_approval_required_tool_stops_before_its_body_runs() -> None:
+    with pytest.raises(RuntimeError, match="requested human approval"):
+        asyncio.run(ApprovalWorkflow().run(ApprovalRequest(prompt="delete it")))
+
+    assert approval_calls == []
+
+
+def test_waymark_false_tool_metadata_is_rejected_before_execution() -> None:
+    with pytest.raises(RuntimeError, match="invalid 'waymark' metadata"):
+        asyncio.run(
+            UnsupportedMetadataWorkflow().run(
+                UnsupportedMetadataRequest(prompt="run the tool")
+            )
+        )
+
+    assert unsupported_metadata_calls == []
+
+
+def test_tool_timeout_retries_only_to_its_configured_attempts() -> None:
+    with pytest.raises(RuntimeError, match="failed after 2 Waymark attempts"):
+        asyncio.run(TimeoutWorkflow().run(TimeoutRequest(prompt="run the tool")))
+
+    assert timeout_calls == ["called", "called"]
 
 
 def test_tool_can_request_a_durable_workflow_sleep() -> None:
@@ -287,6 +531,12 @@ def test_tool_can_request_a_durable_workflow_sleep() -> None:
     tool_ir_text = str(tool_ir)
     assert "sleep_stmt" in tool_ir_text
     assert 'name: "sleep_seconds"' in tool_ir_text
+
+
+@pytest.mark.parametrize("seconds", [-1, float("nan"), float("inf")])
+def test_durable_sleep_rejects_invalid_durations(seconds: float) -> None:
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        DurableSleep(seconds)
 
 
 def test_tools_parallelize_around_sequential_barriers() -> None:
@@ -315,6 +565,40 @@ def test_request_serializes_agent_by_module_variable() -> None:
     assert run_types == {"request": AgentRequest, "return": Answer}
     assert "run" not in PydanticAIWorkflow.__dict__
     assert "run_workflow_tool" not in PydanticAIWorkflow.__dict__
+
+
+def test_request_rejects_a_tampered_agent_reference() -> None:
+    with pytest.raises(ValidationError, match="request agent must be"):
+        AgentRequest(prompt="answer this", agent_reference="attacker:agent")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("attempts", 0),
+        ("initial_seconds", -1),
+        ("multiplier", 0.5),
+        ("max_seconds", -1),
+    ],
+)
+def test_backoff_config_rejects_unsafe_values(field: str, value: float) -> None:
+    with pytest.raises(ValidationError):
+        BackoffConfig(**{field: value})
+
+
+def test_invalid_message_history_fails_without_retrying_the_model() -> None:
+    with pytest.raises(RuntimeError, match="Invalid JSON"):
+        asyncio.run(
+            AgentWorkflow().run(
+                AgentRequest(
+                    prompt="answer this",
+                    message_history="not-json",
+                    model_retry=BackoffConfig(initial_seconds=0, max_seconds=0),
+                )
+            )
+        )
+
+    assert planning_calls == []
 
 
 def test_union_request_routes_to_its_declared_agent() -> None:
