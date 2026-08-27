@@ -47,7 +47,6 @@ from .types import (
     ToolsTransition,
     UsagePayload,
     WaymarkToolPolicy,
-    WorkflowToolArgs,
 )
 
 tool_metadata_adapter = TypeAdapter(dict[str, JsonValue])
@@ -58,22 +57,11 @@ def _pending_tool_call(call: ToolCallPart, metadata: Mapping[str, object]) -> To
     sequential = metadata.get("waymark_sequential", False)
     if not isinstance(sequential, bool):
         raise RuntimeError(f"tool {call.tool_name!r} has an invalid sequential flag")
-    if policy is False:
-        workflow_args = metadata.get("waymark_args")
-        if not isinstance(workflow_args, dict):
-            raise RuntimeError(f"workflow tool {call.tool_name!r} has no validated arguments")
-        return ToolCall(
-            call=dump_tool_call(call),
-            waymark=False,
-            workflow_args=cast(WorkflowToolArgs, workflow_args),
-            sequential=sequential,
-        )
     if policy is None:
         raise RuntimeError(f"tool {call.tool_name!r} has no Waymark action policy")
     return ToolCall(
         call=dump_tool_call(call),
         waymark=WaymarkToolPolicy.model_validate(policy),
-        workflow_args=None,
         sequential=sequential,
     )
 
@@ -147,7 +135,7 @@ async def run_agent_node(
                 remaining = {
                     key: value
                     for key, value in metadata.items()
-                    if key not in {"waymark", "waymark_args", "waymark_sequential"}
+                    if key not in {"waymark", "waymark_sequential"}
                 }
                 if remaining:
                     tool_metadata[tool_call_id] = tool_metadata_adapter.validate_python(
@@ -205,8 +193,6 @@ async def run_agent_tool(
 ) -> ToolActionResult:
     """Execute one validated Pydantic AI tool call as a Waymark action."""
     policy = tool_call.waymark
-    if policy is False:
-        raise RuntimeError("workflow-native tools cannot execute as actions")
     agent = registered_agent(agent_name)
     state = state_adapter.validate_json(transition.state)
     node = load_node(transition.node)
@@ -289,13 +275,6 @@ async def resolve_parallel_tool_results(
         if isinstance(result, BaseException):
             raise result
     return cast(list[ToolActionResult], results)
-
-
-@action(name="pydantic_ai_workflow_tool_not_configured")
-async def raise_workflow_tool_not_configured(agent_name: str, tool_name: str) -> Never:
-    raise RuntimeError(
-        f"workflow tool {tool_name!r} for agent {agent_name!r} has no compiled handler"
-    )
 
 
 @action(name="pydantic_ai_agent_approval_required")

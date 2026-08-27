@@ -1,7 +1,7 @@
 import math
-from typing import Literal, Never
+from typing import Never
 
-from pydantic import TypeAdapter, ValidationError
+from pydantic import ValidationError
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import (
     AbstractCapability,
@@ -13,9 +13,7 @@ from pydantic_ai.exceptions import CallDeferred, UserError
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.tools import DeferredToolRequests, ToolDefinition
 
-from .types import AgentDeps, ToolValue, WaymarkToolPolicy, WorkflowToolArgs
-
-workflow_args_adapter = TypeAdapter(WorkflowToolArgs)
+from .types import AgentDeps, ToolValue, WaymarkToolPolicy
 
 
 class DurableSleep(CallDeferred):
@@ -41,11 +39,9 @@ class DurableSleep(CallDeferred):
         return type(self), (self.seconds, self.result)
 
 
-def _tool_policy(tool_def: ToolDefinition) -> WaymarkToolPolicy | Literal[False]:
+def _tool_policy(tool_def: ToolDefinition) -> WaymarkToolPolicy:
     metadata = tool_def.metadata or {}
     policy = metadata.get("waymark", {})
-    if policy is False:
-        return False
     try:
         return WaymarkToolPolicy.model_validate(policy)
     except ValidationError as error:
@@ -83,8 +79,6 @@ class WaymarkToolBoundary(AbstractCapability[AgentDeps]):
             "waymark": policy,
             "waymark_sequential": tool_def.sequential,
         }
-        if policy is False:
-            metadata["waymark_args"] = workflow_args_adapter.dump_python(args, mode="json")
         raise CallDeferred(metadata=metadata)
 
     async def handle_deferred_tool_calls(

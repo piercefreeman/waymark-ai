@@ -263,6 +263,7 @@ def test_request_serializes_agent_by_module_variable() -> None:
     assert payload["agent_reference"] == f"{__name__}:test_agent"
     assert run_types == {"request": AgentRequest, "return": Answer}
     assert "run" not in PydanticAIWorkflow.__dict__
+    assert "run_workflow_tool" not in PydanticAIWorkflow.__dict__
 
 
 def test_union_request_routes_to_its_declared_agent() -> None:

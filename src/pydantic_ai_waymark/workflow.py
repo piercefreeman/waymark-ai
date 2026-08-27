@@ -1,12 +1,11 @@
 import asyncio
-from typing import Any, Generic, Never, TypeVar
+from typing import Any, Generic, TypeVar
 
 from waymark import Workflow
 
 from .actions import (
     raise_approval_required,
     raise_tool_attempts_exhausted,
-    raise_workflow_tool_not_configured,
     resolve_parallel_tool_results,
     run_agent_node,
     run_agent_tool,
@@ -18,8 +17,6 @@ from .types import (
     PendingTransition,
     ToolActionResult,
     ToolCall,
-    ToolValue,
-    WorkflowToolArgs,
 )
 
 AIRequestT = TypeVar("AIRequestT", bound=AIRequestBase[Any])
@@ -168,29 +165,8 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
         """Dispatch one tool call through its configured durability boundary.
 
         Tool handling calls this directly for sequential calls and through a segment
-        otherwise: workflow-native calls stay in workflow code, all others use actions.
+        otherwise; each call runs as a separately persisted, retried Waymark action.
         """
-        if tool_call.waymark is False:
-            # metadata={"waymark": False}: execute deterministic, compileable
-            # workflow code, such as asyncio.sleep(), outside an action.
-            if tool_call.workflow_args is None:
-                return await self._unsupported_workflow_tool(
-                    request.agent_reference, tool_call.call.tool_name
-                )
-            workflow_value = await self.run_workflow_tool(
-                request.agent_reference,
-                tool_call.call.tool_name,
-                tool_call.workflow_args,
-            )
-            return {
-                "kind": "return",
-                "tool_call_id": tool_call.call.tool_call_id,
-                "tool_name": tool_call.call.tool_name,
-                "value": workflow_value,
-            }
-
-        # Default or metadata={"waymark": {...}}: execute side-effecting tool
-        # code as an action, using the retry policy validated into this model.
         tool_attempt = 0
         action_result: ToolActionResult | None = None
         while True:
@@ -224,24 +200,3 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
                 "value": action_result["value"],
             }
         return action_result
-
-    async def run_workflow_tool(
-        self,
-        agent_name: str,
-        tool_name: str,
-        args: WorkflowToolArgs,
-    ) -> ToolValue:
-        """Execute a tool explicitly registered with ``metadata={"waymark": False}``.
-
-        ``_run_agent_tool_call`` invokes this only for workflow-native calls; concrete
-        workflows override it to route supported names and may reject unknown names.
-        """
-        return await self._unsupported_workflow_tool(agent_name, tool_name)
-
-    async def _unsupported_workflow_tool(self, agent_name: str, tool_name: str) -> Never:
-        """Fail a workflow-native tool call that the concrete workflow cannot route.
-
-        The default ``run_workflow_tool`` calls this for every name; overrides can
-        use it as their fallback after handling their supported workflow-native tools.
-        """
-        return await raise_workflow_tool_not_configured(agent_name, tool_name)

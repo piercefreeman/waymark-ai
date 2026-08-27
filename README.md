@@ -165,9 +165,6 @@ no worker is occupied and a restart resumes at the timer deadline. Afterward,
 the requested value is applied through `DeferredToolResults` like a normal tool
 return.
 
-Other deterministic workflow-native tools can still use
-`metadata={"waymark": False}` and a compiled `run_workflow_tool` dispatcher.
-
 The graph-state wire format currently relies on Pydantic AI's private graph
 types, so the dependency is deliberately pinned to the `2.21.x` line. Upgrade
 Pydantic AI only with the adapter tests passing. Human-approval and already

@@ -1,7 +1,7 @@
 from collections.abc import Sequence
-from typing import Any, Literal, Self, TypeAlias, TypedDict
+from typing import Any, Literal, TypeAlias, TypedDict
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic_ai import _agent_graph
 from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.messages import UserContent
@@ -25,7 +25,6 @@ PersistedPydanticNode: TypeAlias = (
 UserPrompt: TypeAlias = str | Sequence[UserContent] | None
 
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
-WorkflowToolArgs: TypeAlias = dict[str, JsonValue]
 ToolMetadata: TypeAlias = dict[str, dict[str, JsonValue]]
 
 
@@ -76,15 +75,8 @@ class WaymarkToolPolicy(WireModel):
 
 class ToolCall(WireModel):
     call: SerializedToolCall
-    waymark: WaymarkToolPolicy | Literal[False]
-    workflow_args: WorkflowToolArgs | None
+    waymark: WaymarkToolPolicy
     sequential: bool = False
-
-    @model_validator(mode="after")
-    def validate_dispatch(self) -> Self:
-        if (self.waymark is False) != (self.workflow_args is not None):
-            raise ValueError("workflow arguments must be set only for workflow-native tools")
-        return self
 
 
 class ModelRequestNodePayload(WireModel):
