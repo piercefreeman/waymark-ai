@@ -132,50 +132,6 @@ workflow that runs a support agent and an independent review agent concurrently.
 `conversation_id`, and `run_id`. Its `to_json()` representation includes the
 stable agent reference needed by the worker.
 
-## Durable boundaries
-
-Pydantic AI's Temporal and DBOS integrations use capability hooks and model /
-toolset wrappers to put provider requests and tool executions into their
-runtime's durable units. Waymark cannot use that implementation literally:
-Waymark executes compiled workflow IR rather than replaying the Python body.
-
-This adapter exposes the same work to Waymark's compiler:
-
-| Pydantic AI progression | Waymark boundary |
-| --- | --- |
-| `UserPromptNode` | `pydantic_ai_agent_node` action |
-| `ModelRequestNode` | `pydantic_ai_agent_node` action |
-| `CallToolsNode` validation/control | `pydantic_ai_agent_node` action |
-| Each validated user tool | `pydantic_ai_agent_tool` action |
-| Applying recorded tool results | resumed `pydantic_ai_agent_node` action |
-
-The adapter uses a short-lived Pydantic AI capability to defer validated tools
-before their Python bodies execute. The compiled workflow schedules each tool,
-then resumes the same `CallToolsNode` with `DeferredToolResults`. Graph state,
-retry state, usage, messages, run ID, and conversation ID cross every action
-boundary.
-
-Graph-node checkpoints retry only provider connection failures and HTTP 408,
-409, 429, and 5xx responses. Other failures stop immediately. Retryable failures
-default to three attempts with bounded exponential backoff; configure a request
-with `model_retry=BackoffConfig(...)`. Application hooks can mark another known
-transient failure by raising `RetryableAgentError`. Model request timeouts still
-come from Pydantic AI's `ModelSettings` or the provider client. Tool actions remain
-bounded by their `metadata["waymark"]` policy because they may have side effects.
-
-`DurableSleep` subclasses Pydantic AI's `CallDeferred`. The tool body raises it
-inside `pydantic_ai_agent_tool`; the action returns a typed sleep request rather
-than failing. Waymark then executes `asyncio.sleep(...)` at workflow level, so
-no worker is occupied and a restart resumes at the timer deadline. Afterward,
-the requested value is applied through `DeferredToolResults` like a normal tool
-return.
-
-The graph-state wire format currently relies on Pydantic AI's private graph
-types, so the dependency is deliberately pinned to the `2.21.x` line. Upgrade
-Pydantic AI only with the adapter tests passing. Human-approval and already
-external/deferred tools currently stop with a clear error instead of being
-auto-approved.
-
 ## Docker Compose example
 
 The example includes Postgres, Waymark workers, the Waymark dashboard, and a
