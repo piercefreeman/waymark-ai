@@ -70,6 +70,10 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
                     )
                 )
             except Exception:
+                # Graph-node actions are replay-safe because they never execute user tools, so
+                # transient provider, transport, and planning-hook failures can retry forever.
+                # This is deliberately broad: permanent model/config errors also require
+                # cancellation.
                 await asyncio.sleep(2)
 
     async def _handle_agent_approvals(
