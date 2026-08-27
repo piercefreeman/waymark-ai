@@ -1,0 +1,57 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: waymark_ai
+      POSTGRES_USER: waymark
+      POSTGRES_PASSWORD: waymark
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U waymark -d waymark_ai"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  workers:
+    build:
+      context: ..
+      dockerfile: examples/Dockerfile
+    command: ["waymark-start-workers"]
+    env_file: ../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      WAYMARK_DATABASE_URL: postgresql://waymark:waymark@postgres:5432/waymark_ai
+      WAYMARK_USER_MODULE: examples.support_agent
+      WAYMARK_WORKER_COUNT: 1
+      WAYMARK_WEBAPP_ENABLED: "true"
+      WAYMARK_WEBAPP_ADDR: 0.0.0.0:24119
+    ports:
+      - "24119:24119"
+
+  web:
+    build:
+      context: ..
+      dockerfile: examples/Dockerfile
+    env_file: ../.env
+    depends_on:
+      workers:
+        condition: service_started
+    environment:
+      WAYMARK_DATABASE_URL: postgresql://waymark:waymark@postgres:5432/waymark_ai
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://localhost:8000/health')
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres-data: {}
