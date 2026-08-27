@@ -12,7 +12,7 @@ from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pytest_httpx import HTTPXMock
-from waymark import workflow
+from waymark import action, workflow
 
 from pydantic_ai_waymark import (
     AgentResult,
@@ -36,6 +36,7 @@ def reset_mutable_test_state() -> None:
     tool_calls.clear()
     approval_calls.clear()
     timeout_calls.clear()
+    hook_events.clear()
 
 
 class Answer(BaseModel):
@@ -93,6 +94,7 @@ approval_agent = waymark_agent(
 timeout_agent = waymark_agent(Agent(TestModel(call_tools=["slow_tool"]), name="timeout_agent"))
 approval_calls: list[str] = []
 timeout_calls: list[str] = []
+hook_events: list[tuple[str, str | None, str | None, object]] = []
 
 
 @tool_agent.tool_plain(retries=1, timeout=10)
@@ -179,6 +181,16 @@ class TimeoutRequest(AIRequestBase[None]):
     agent = timeout_agent
 
 
+@action
+async def record_hook(
+    event: str,
+    agent_request: ToolRequest,
+    tool_id: str | None = None,
+    payload: object = None,
+) -> None:
+    hook_events.append((event, agent_request.prompt, tool_id, payload))
+
+
 @workflow
 class AgentWorkflow(PydanticAIWorkflow[AgentRequest]):
     async def run(self, request: AgentRequest) -> Answer:
@@ -187,6 +199,55 @@ class AgentWorkflow(PydanticAIWorkflow[AgentRequest]):
 
 @workflow
 class ToolWorkflow(PydanticAIWorkflow[ToolRequest]):
+    async def run(self, request: ToolRequest) -> str:
+        return (await self.run_agent(request)).output
+
+
+@workflow
+class HookWorkflow(PydanticAIWorkflow[ToolRequest]):
+    async def on_agent_start(self, agent_request: ToolRequest) -> None:
+        await self.run_action(record_hook(event="agent_start", agent_request=agent_request))
+
+    async def on_agent_end(self, agent_request: ToolRequest, payload: AgentResult) -> None:
+        await self.run_action(
+            record_hook(event="agent_end", agent_request=agent_request, payload=payload)
+        )
+
+    async def on_message(self, agent_request: ToolRequest, message: str) -> None:
+        await self.run_action(
+            record_hook(event="message", agent_request=agent_request, payload=message)
+        )
+
+    async def on_tool_start(
+        self,
+        agent_request: ToolRequest,
+        tool_id: str,
+        tool_args: object,
+    ) -> None:
+        await self.run_action(
+            record_hook(
+                event="tool_start",
+                agent_request=agent_request,
+                tool_id=tool_id,
+                payload=tool_args,
+            )
+        )
+
+    async def on_tool_end(
+        self,
+        agent_request: ToolRequest,
+        tool_id: str,
+        payload: object,
+    ) -> None:
+        await self.run_action(
+            record_hook(
+                event="tool_end",
+                agent_request=agent_request,
+                tool_id=tool_id,
+                payload=payload,
+            )
+        )
+
     async def run(self, request: ToolRequest) -> str:
         return (await self.run_agent(request)).output
 
@@ -485,6 +546,33 @@ def test_waymark_executes_each_tool_as_its_own_action() -> None:
 
     assert result == '{"lookup":"found"}'
     assert tool_calls == ["a"]
+
+
+def test_workflow_lifecycle_hooks_can_be_overridden() -> None:
+    result = asyncio.run(HookWorkflow().run(ToolRequest(prompt="answer this")))
+
+    assert result == '{"lookup":"found"}'
+    assert [event[0] for event in hook_events] == [
+        "agent_start",
+        "tool_start",
+        "tool_end",
+        "message",
+        "agent_end",
+    ]
+    tool_id = hook_events[1][2]
+    assert tool_id is not None
+    assert hook_events[1][1:] == ("answer this", tool_id, {"query": "a"})
+    assert hook_events[2][1:] == (
+        "answer this",
+        tool_id,
+        {
+            "kind": "return",
+            "tool_call_id": tool_id,
+            "tool_name": "lookup",
+            "value": "found",
+        },
+    )
+    assert hook_events[3][1:] == ("answer this", None, '{"lookup":"found"}')
 
 
 def test_pydantic_tool_retry_survives_across_waymark_actions() -> None:

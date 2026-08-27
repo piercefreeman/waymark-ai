@@ -16,6 +16,7 @@ from .types import (
     AgentResult,
     AgentTransition,
     BackoffConfig,
+    JsonValue,
     PendingTransition,
     ToolActionResult,
     ToolCall,
@@ -27,6 +28,8 @@ AIRequestT = TypeVar("AIRequestT", bound=AIRequestBase[Any])
 class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
     """Workflow base that compiles Pydantic AI graph and tool transitions to actions."""
 
+    # Public
+
     async def run_agent(
         self,
         request: AIRequestT,
@@ -36,6 +39,7 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
         Concrete workflow entrypoints call this once per request; each iteration runs
         the next graph node, stops on a final result, or dispatches its pending tools.
         """
+        await self.on_agent_start(request)
         transition: AgentTransition | None = None
         tool_results: list[ToolActionResult] = []
         while True:
@@ -45,12 +49,44 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
                 tool_results,
             )
             if transition.kind == "done":
+                await self.on_agent_end(request, transition.result)
                 return transition.result
+            for message in transition.messages:
+                await self.on_message(request, message)
             await self._handle_agent_approvals(request.agent_reference, transition)
             tool_results = await self._handle_agent_tools(
                 request,
                 transition,
             )
+
+    # Overrides
+
+    async def on_agent_start(self, agent_request: AIRequestT) -> None:
+        """Run when an agent request starts."""
+
+    async def on_agent_end(self, agent_request: AIRequestT, payload: AgentResult) -> None:
+        """Run when an agent request completes."""
+
+    async def on_message(self, agent_request: AIRequestT, message: str) -> None:
+        """Run when the model returns a plain text message."""
+
+    async def on_tool_start(
+        self,
+        agent_request: AIRequestT,
+        tool_id: str,
+        tool_args: str | dict[str, JsonValue] | None,
+    ) -> None:
+        """Run before a tool action starts."""
+
+    async def on_tool_end(
+        self,
+        agent_request: AIRequestT,
+        tool_id: str,
+        payload: ToolActionResult,
+    ) -> None:
+        """Run after a tool action completes."""
+
+    # Helper functions
 
     async def _next_agent_transition(
         self,
@@ -191,6 +227,11 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
         otherwise; each call runs as a separately persisted Waymark action while
         Pydantic AI applies the tool's native retry and timeout settings.
         """
+        await self.on_tool_start(
+            request,
+            tool_call.call.tool_call_id,
+            tool_call.call.args,
+        )
         action_result = await self.run_action(
             run_agent_tool(
                 request.agent_reference,
@@ -204,10 +245,13 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
         if action_result["kind"] == "sleep":
             sleep_seconds = action_result["seconds"]
             await asyncio.sleep(sleep_seconds)
-            return {
+            result: ToolActionResult = {
                 "kind": "return",
                 "tool_call_id": action_result["tool_call_id"],
                 "tool_name": action_result["tool_name"],
                 "value": action_result["value"],
             }
-        return action_result
+        else:
+            result = action_result
+        await self.on_tool_end(request, tool_call.call.tool_call_id, result)
+        return result

@@ -198,6 +198,78 @@ Stop the stack and remove its example database with:
 docker compose -f examples/docker-compose.yml down -v
 ```
 
+## Lifecycle hooks
+
+Sometimes you want to keep users informed about an agent's progress. The easiest
+way to do that is to register hooks for state changes, such as when an agent receives
+a tool call and when that tool finishes. This mirrors agent harnesses like Codex and
+Claude Code, which show the currently running tool in shimmering text beneath the
+conversation history.
+
+Use these hooks to save the current state to a database for polling, or push updates
+through a websocket service for broadcast, as shown below. `PydanticAIWorkflow`
+provides no-op `on_agent_start`, `on_agent_end`, `on_message`, `on_tool_start`, and
+`on_tool_end` methods. Override only the hooks you need, and put external I/O in a
+Waymark action so the side effect remains durable:
+
+```python
+from typing import Any
+
+from waymark import action, workflow
+
+
+@action
+async def publish_event(event: str, payload: dict[str, Any]) -> None:
+    await websocket_service.publish(event, payload)
+
+
+@workflow
+class ObservableSupportWorkflow(PydanticAIWorkflow[SupportRequest]):
+    async def on_message(
+        self,
+        agent_request: SupportRequest,
+        message: str,
+    ) -> None:
+        await self.run_action(
+            publish_event(
+                event="message.received",
+                payload={"message": message},
+            )
+        )
+
+    async def on_tool_start(
+        self,
+        agent_request: SupportRequest,
+        tool_id: str,
+        tool_args: object,
+    ) -> None:
+        await self.run_action(
+            publish_event(
+                event="tool.started",
+                payload={"tool_id": tool_id, "args": tool_args},
+            )
+        )
+
+    async def on_tool_end(
+        self,
+        agent_request: SupportRequest,
+        tool_id: str,
+        payload: object,
+    ) -> None:
+        await self.run_action(
+            publish_event(
+                event="tool.ended",
+                payload={"tool_id": tool_id, "result": payload},
+            )
+        )
+
+    async def run(self, request: SupportRequest) -> Reply:
+        return (await self.run_agent(request)).output
+```
+
+The end-hook payloads are the complete `AgentResult` and tool-result dictionary.
+Use `tool_id` as an idempotency key when the receiving service may see retries.
+
 ## Workers
 
 The module containing registered agents must be importable by each worker:
