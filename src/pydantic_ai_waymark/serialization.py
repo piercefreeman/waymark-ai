@@ -21,6 +21,7 @@ from .types import (
     ModelRequestNodePayload,
     PendingTransition,
     PersistedPydanticNode,
+    RegisteredAgent,
     RegisteredAgentRun,
     SerializedToolCall,
     ToolActionResult,
@@ -30,6 +31,12 @@ from .types import (
 state_adapter = TypeAdapter(_agent_graph.GraphAgentState)
 usage_adapter = TypeAdapter(RunUsage)
 tool_call_adapter = TypeAdapter(ToolCallPart)
+
+
+def restore_agent_deps(agent: RegisteredAgent, deps: object) -> object:
+    if deps is None or isinstance(deps, agent.deps_type):
+        return deps
+    return TypeAdapter(agent.deps_type).validate_python(deps)
 
 
 def dump_message(message: ModelMessage) -> str:

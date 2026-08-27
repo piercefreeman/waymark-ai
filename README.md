@@ -171,7 +171,7 @@ from pydantic_ai_waymark import DurableSleep
 
 
 @support_agent.tool_plain
-def wait_for_follow_up(seconds: float = 45) -> str:
+def wait_for_follow_up(seconds: float = 5) -> str:
     raise DurableSleep(seconds, result="Follow-up wait completed.")
 ```
 
@@ -188,9 +188,9 @@ docker compose -f examples/docker-compose.yml up --build
 Open [http://localhost:8000](http://localhost:8000). The Waymark dashboard is at
 [http://localhost:24119](http://localhost:24119).
 
-The example agent calls three action tools and one `DurableSleep` tool. A
-request visibly exercises model actions, separate tool actions, a 45-second
-durable timer, and the resumed model action.
+The support form calls three action tools without sleeping. A separate sleep
+form passes a configurable duration through the agent's dependencies and
+visibly exercises a `DurableSleep` timer before the model resumes.
 
 Stop the stack and remove its example database with:
 
