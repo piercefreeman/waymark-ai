@@ -4,7 +4,9 @@ from typing import Any, Generic, TypeVar
 from waymark import Workflow
 
 from .actions import (
+    RetryableAgentError,
     raise_approval_required,
+    raise_model_attempts_exhausted,
     raise_tool_attempts_exhausted,
     resolve_parallel_tool_results,
     run_agent_node,
@@ -14,6 +16,7 @@ from .request import AIRequestBase
 from .types import (
     AgentResult,
     AgentTransition,
+    BackoffConfig,
     PendingTransition,
     ToolActionResult,
     ToolCall,
@@ -60,8 +63,11 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
 
         ``run_agent`` calls this initially and after every tool batch, passing the
         prior transition and results so the graph can return its next node or result.
+        Only ``RetryableAgentError`` uses the request's bounded retry configuration.
         """
+        model_attempt = 0
         while True:
+            model_attempt += 1
             try:
                 return await self.run_action(
                     run_agent_node(
@@ -76,12 +82,34 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
                         run_id=request.run_id,
                     )
                 )
-            except Exception:
-                # Graph-node actions are replay-safe because they never execute user tools, so
-                # transient provider, transport, and planning-hook failures can retry forever.
-                # This is deliberately broad: permanent model/config errors also require
-                # cancellation.
-                await asyncio.sleep(2)
+            except RetryableAgentError:
+                if model_attempt >= request.model_retry.attempts:
+                    await raise_model_attempts_exhausted(model_attempt)
+                backoff_seconds = await self._model_retry_backoff_seconds(
+                    request.model_retry,
+                    model_attempt,
+                )
+                if backoff_seconds > 0.0:
+                    await asyncio.sleep(backoff_seconds)
+
+    async def _model_retry_backoff_seconds(
+        self,
+        config: BackoffConfig,
+        failed_attempt: int,
+    ) -> float:
+        """Calculate the next bounded exponential delay after a transient failure.
+
+        ``_next_agent_transition`` calls this only between retryable model attempts;
+        the first failure uses ``initial_seconds`` and later failures multiply it.
+        """
+        delay = config.initial_seconds
+        backoff_step = 1
+        while backoff_step < failed_attempt:
+            delay = delay * config.multiplier
+            backoff_step += 1
+        if delay > config.max_seconds:
+            return config.max_seconds
+        return delay
 
     async def _handle_agent_approvals(
         self,

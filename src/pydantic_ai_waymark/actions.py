@@ -7,6 +7,8 @@ from pydantic_ai import ModelMessagesTypeAdapter, _agent_graph
 from pydantic_ai.exceptions import (
     ApprovalRequired,
     CallDeferred,
+    ModelAPIError,
+    ModelHTTPError,
     ModelRetry,
     ToolFailed,
     ToolFailedError,
@@ -50,6 +52,10 @@ from .types import (
 )
 
 tool_metadata_adapter = TypeAdapter(dict[str, JsonValue])
+
+
+class RetryableAgentError(RuntimeError):
+    """A transient provider failure that may safely rerun its graph-node action."""
 
 
 def _pending_tool_call(call: ToolCallPart, metadata: Mapping[str, object]) -> ToolCall:
@@ -153,6 +159,12 @@ async def run_agent_node(
                 approvals=[dump_tool_call(call) for call in pending.requests.approvals],
                 tool_metadata=tool_metadata,
             )
+        except ModelHTTPError as error:
+            if error.status_code not in (408, 409, 429) and error.status_code < 500:
+                raise
+            raise RetryableAgentError(str(error)) from error
+        except ModelAPIError as error:
+            raise RetryableAgentError(str(error)) from error
 
         if isinstance(next_node, End):
             result = agent_run.result
@@ -265,6 +277,11 @@ async def run_agent_tool(
 @action(name="pydantic_ai_agent_tool_attempts_exhausted")
 async def raise_tool_attempts_exhausted(tool_name: str, attempts: int) -> Never:
     raise RuntimeError(f"tool {tool_name!r} failed after {attempts} Waymark attempts")
+
+
+@action(name="pydantic_ai_agent_model_attempts_exhausted")
+async def raise_model_attempts_exhausted(attempts: int) -> Never:
+    raise RuntimeError(f"model request failed after {attempts} transient attempts")
 
 
 @action(name="pydantic_ai_parallel_tool_results")

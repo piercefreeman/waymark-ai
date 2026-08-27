@@ -153,10 +153,13 @@ then resumes the same `CallToolsNode` with `DeferredToolResults`. Graph state,
 retry state, usage, messages, run ID, and conversation ID cross every action
 boundary.
 
-Graph-node checkpoints retry indefinitely with durable backoff. They have no
-adapter-level timeout; model request timeouts come from Pydantic AI's
-`ModelSettings` or the provider client. Tool actions remain bounded by their
-`metadata["waymark"]` policy because they may have side effects.
+Graph-node checkpoints retry only provider connection failures and HTTP 408,
+409, 429, and 5xx responses. Other failures stop immediately. Retryable failures
+default to three attempts with bounded exponential backoff; configure a request
+with `model_retry=BackoffConfig(...)`. Application hooks can mark another known
+transient failure by raising `RetryableAgentError`. Model request timeouts still
+come from Pydantic AI's `ModelSettings` or the provider client. Tool actions remain
+bounded by their `metadata["waymark"]` policy because they may have side effects.
 
 `DurableSleep` subclasses Pydantic AI's `CallDeferred`. The tool body raises it
 inside `pydantic_ai_agent_tool`; the action returns a typed sleep request rather

@@ -1,9 +1,10 @@
 from typing import Any, ClassVar, Generic, Self, TypeVar
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_ai import Agent
 
 from .registry import agent_reference as serialize_agent_reference
+from .types import BackoffConfig
 
 AgentDependenciesT = TypeVar("AgentDependenciesT")
 
@@ -20,6 +21,7 @@ class AIRequestBase(BaseModel, Generic[AgentDependenciesT]):
     model: str | None = None
     conversation_id: str | None = None
     run_id: str | None = None
+    model_retry: BackoffConfig = Field(default_factory=BackoffConfig)
     agent_reference: str = ""
 
     @model_validator(mode="after")

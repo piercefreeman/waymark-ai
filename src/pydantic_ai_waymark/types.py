@@ -32,6 +32,15 @@ class WireModel(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
 
+class BackoffConfig(WireModel):
+    """Bounded exponential backoff for retryable model-request failures."""
+
+    attempts: int = Field(default=3, ge=1)
+    initial_seconds: float = Field(default=2.0, ge=0)
+    multiplier: float = Field(default=2.0, ge=1)
+    max_seconds: float = Field(default=30.0, ge=0)
+
+
 class UsagePayload(WireModel):
     input_tokens: int
     cache_write_tokens: int

@@ -5,12 +5,14 @@ from typing import get_type_hints
 import pytest
 from pydantic import BaseModel
 from pydantic_ai import Agent, ModelMessagesTypeAdapter
+from pydantic_ai.exceptions import ModelAPIError
 from pydantic_ai.models.test import TestModel
 from waymark import workflow
 
 from pydantic_ai_waymark import (
     AgentResult,
     AIRequestBase,
+    BackoffConfig,
     DurableSleep,
     PydanticAIWorkflow,
     run_agent_node,
@@ -31,6 +33,7 @@ test_agent = waymark_agent(
     )
 )
 planning_failures = [0]
+planning_failure_kind = ["transient"]
 planning_calls: list[str] = []
 
 
@@ -39,6 +42,8 @@ def transient_planning() -> str:
     planning_calls.append("called")
     if planning_failures[0]:
         planning_failures[0] -= 1
+        if planning_failure_kind[0] == "transient":
+            raise ModelAPIError("test", "transient planning failure")
         raise RuntimeError("transient planning failure")
     return "Answer the request."
 
@@ -196,14 +201,60 @@ def test_waymark_executes_compiled_agent_state_machine() -> None:
     assert "sleep_stmt" in ir_text
 
 
-def test_planning_retries_without_a_hard_limit() -> None:
+def test_transient_model_failure_retries_with_backoff() -> None:
     planning_calls.clear()
     planning_failures[0] = 1
+    planning_failure_kind[0] = "transient"
 
-    result = asyncio.run(AgentWorkflow().run(AgentRequest(prompt="answer this")))
+    result = asyncio.run(
+        AgentWorkflow().run(
+            AgentRequest(
+                prompt="answer this",
+                model_retry=BackoffConfig(initial_seconds=0, max_seconds=0),
+            )
+        )
+    )
 
     assert result == Answer(value="durable")
     assert planning_calls == ["called", "called"]
+
+
+def test_permanent_planning_failure_is_not_retried() -> None:
+    planning_calls.clear()
+    planning_failures[0] = 1
+    planning_failure_kind[0] = "permanent"
+
+    with pytest.raises(RuntimeError, match="transient planning failure"):
+        asyncio.run(AgentWorkflow().run(AgentRequest(prompt="answer this")))
+
+    assert planning_calls == ["called"]
+
+
+def test_model_retry_attempts_and_backoff_are_bounded() -> None:
+    planning_calls.clear()
+    planning_failures[0] = 3
+    planning_failure_kind[0] = "transient"
+    config = BackoffConfig(
+        attempts=2,
+        initial_seconds=2,
+        multiplier=3,
+        max_seconds=5,
+    )
+
+    with pytest.raises(RuntimeError, match="failed after 2 transient attempts"):
+        asyncio.run(
+            AgentWorkflow().run(
+                AgentRequest(
+                    prompt="answer this",
+                    model_retry=config.model_copy(update={"initial_seconds": 0}),
+                )
+            )
+        )
+
+    planning_failures[0] = 0
+    assert planning_calls == ["called", "called"]
+    assert asyncio.run(AgentWorkflow()._model_retry_backoff_seconds(config, 1)) == 2
+    assert asyncio.run(AgentWorkflow()._model_retry_backoff_seconds(config, 2)) == 5
 
 
 def test_waymark_executes_each_tool_as_its_own_action() -> None:
