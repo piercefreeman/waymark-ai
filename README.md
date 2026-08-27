@@ -70,13 +70,30 @@ def lookup_policy(topic: str) -> str:
 These values control Waymark action attempts. Pydantic AI's `retries=` and
 `timeout=` arguments remain model-facing tool retry settings.
 
-Use `metadata={"waymark": False}` for a deterministic async tool that should
-run as compiled workflow logic instead of a Python action. Implement its
-dispatch in `PydanticAIWorkflow.run_workflow_tool`; calls to `asyncio.sleep()`
-there compile to durable Waymark timers.
+Declare a deterministic workflow tool once on the workflow and decorate it
+directly with the agent. `run_workflow_tool` is the compiler-visible dispatch
+table; calls to `asyncio.sleep()` become durable Waymark timers:
 
-Registration happens at module scope so every Waymark worker can import the
-same agent by its stable name.
+```python
+@workflow
+class SupportWorkflow(PydanticAIWorkflow):
+    @staticmethod
+    @support_agent.tool_plain(metadata={"waymark": False})
+    async def wait_for_follow_up(seconds: float = 45) -> str:
+        await asyncio.sleep(seconds)
+        return "Follow-up wait completed."
+
+    async def run_workflow_tool(self, agent_name, tool_name, args):
+        if tool_name == "wait_for_follow_up":
+            return await self.wait_for_follow_up(args["seconds"])
+        return await self._unsupported_workflow_tool(agent_name, tool_name)
+```
+
+The explicit dispatch is required because Waymark statically compiles workflow
+calls; it cannot dynamically invoke a Python callable selected by the model.
+
+Define the agent and workflow at module scope so every Waymark worker can
+import the same registration by its stable name.
 
 ## Compile the agent into a workflow
 

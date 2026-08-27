@@ -73,6 +73,7 @@ class ToolWorkflow(PydanticAIWorkflow):
 @workflow
 class WorkflowToolWorkflow(PydanticAIWorkflow):
     @staticmethod
+    @workflow_tool_agent.tool_plain(metadata={"waymark": False})
     async def pause() -> str:
         seconds = 0.001
         await asyncio.sleep(seconds)
@@ -91,9 +92,6 @@ class WorkflowToolWorkflow(PydanticAIWorkflow):
     async def run(self, prompt: str) -> str:
         result = await self.run_agent("workflow_tool_agent", prompt)
         return result["output"]
-
-
-workflow_tool_agent.tool_plain(metadata={"waymark": False})(WorkflowToolWorkflow.pause)
 
 
 async def drive(agent_name: str) -> tuple[dict, int]:

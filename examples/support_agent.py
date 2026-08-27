@@ -55,6 +55,7 @@ def estimate_resolution_time(issue_type: str) -> str:
 @workflow
 class SupportWorkflow(PydanticAIWorkflow):
     @staticmethod
+    @support_agent.tool_plain(metadata={"waymark": False})
     async def wait_for_follow_up(seconds: float = 45) -> str:
         """Wait durably before returning the support answer."""
         await asyncio.sleep(seconds)
@@ -77,6 +78,3 @@ class SupportWorkflow(PydanticAIWorkflow):
             message_history=message_history,
         )
         return result["output"]
-
-
-support_agent.tool_plain(metadata={"waymark": False})(SupportWorkflow.wait_for_follow_up)
