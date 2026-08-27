@@ -54,9 +54,7 @@ def agent_reference(agent: RegisteredAgent, module_name: str) -> str:
     """Return the importable module variable that holds an agent."""
     module = import_module(module_name)
     names = sorted(
-        name
-        for name, value in vars(module).items()
-        if value is agent and not name.startswith("_")
+        name for name, value in vars(module).items() if value is agent and not name.startswith("_")
     )
     if not names:
         raise ValueError(f"agent must be assigned to a public module variable in {module_name!r}")

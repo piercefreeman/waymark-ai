@@ -58,9 +58,7 @@ def dump_node(node: PersistedPydanticNode) -> AgentNodePayload:
             request=dump_message(node.request),
             is_resuming_without_prompt=node.is_resuming_without_prompt,
             resume_suspended=(
-                dump_message(node._resume_suspended)
-                if node._resume_suspended is not None
-                else None
+                dump_message(node._resume_suspended) if node._resume_suspended is not None else None
             ),
         )
     if isinstance(node, _agent_graph.CallToolsNode):
