@@ -4,7 +4,7 @@ from urllib.parse import parse_qs
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 
-from .support_agent import SupportWorkflow
+from .support_agent import SupportRequest, SupportWorkflow
 
 app = FastAPI(title="Pydantic AI + Waymark")
 
@@ -68,7 +68,7 @@ async def run_agent(request: Request) -> HTMLResponse:
         return HTMLResponse(page(error="Prompt is required."), status_code=422)
 
     try:
-        reply = await SupportWorkflow().run(prompt)
+        reply = await SupportWorkflow().run(SupportRequest(prompt=prompt))
     except Exception as error:
         return HTMLResponse(page(prompt=prompt, error=str(error)), status_code=500)
     return HTMLResponse(page(prompt=prompt, answer=reply.answer))

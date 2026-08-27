@@ -1,5 +1,8 @@
 import inspect
+from importlib import import_module
 from typing import TypeVar
+
+from pydantic_ai.agent import AbstractAgent
 
 from .types import RegisteredAgent
 
@@ -33,9 +36,31 @@ def waymark_agent(
 def registered_agent(reference: str) -> RegisteredAgent:
     if agent := _agents.get(reference):
         return agent
+    module_name, separator, variable_name = reference.rpartition(":")
+    if separator:
+        value = getattr(import_module(module_name), variable_name, None)
+        if isinstance(value, AbstractAgent):
+            _agents[reference] = value
+            return value
     matches = [agent for key, agent in _agents.items() if key.endswith(f":{reference}")]
     if len(matches) == 1:
         return matches[0]
     if matches:
         raise ValueError(f"agent name {reference!r} is ambiguous; use 'module:name'")
     raise KeyError(f"agent {reference!r} is not registered")
+
+
+def agent_reference(agent: RegisteredAgent, module_name: str) -> str:
+    """Return the importable module variable that holds an agent."""
+    module = import_module(module_name)
+    names = sorted(
+        name
+        for name, value in vars(module).items()
+        if value is agent and not name.startswith("_")
+    )
+    if not names:
+        raise ValueError(f"agent must be assigned to a public module variable in {module_name!r}")
+    variable_name = agent.name if agent.name in names else names[0]
+    reference = f"{module_name}:{variable_name}"
+    _agents[reference] = agent
+    return reference

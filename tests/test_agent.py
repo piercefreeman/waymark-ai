@@ -1,4 +1,6 @@
 import asyncio
+import json
+from typing import get_type_hints
 
 import pytest
 from pydantic import BaseModel
@@ -8,6 +10,7 @@ from waymark import workflow
 
 from pydantic_ai_waymark import (
     AgentResult,
+    AIRequestBase,
     PydanticAIWorkflow,
     WorkflowToolArgs,
     run_agent_node,
@@ -58,22 +61,30 @@ def lookup(query: str) -> str:
     return "found"
 
 
-@workflow
-class AgentWorkflow(PydanticAIWorkflow):
-    async def run(self, prompt: str) -> Answer:
-        result = await self.run_agent("test_agent", prompt)
-        return result.output
+class AgentRequest(AIRequestBase[None]):
+    agent = test_agent
+
+
+class ToolRequest(AIRequestBase[None]):
+    agent = tool_agent
+
+
+class WorkflowToolRequest(AIRequestBase[None]):
+    agent = workflow_tool_agent
 
 
 @workflow
-class ToolWorkflow(PydanticAIWorkflow):
-    async def run(self, prompt: str) -> str:
-        result = await self.run_agent("tool_agent", prompt)
-        return result.output
+class AgentWorkflow(PydanticAIWorkflow[AgentRequest]):
+    pass
 
 
 @workflow
-class WorkflowToolWorkflow(PydanticAIWorkflow):
+class ToolWorkflow(PydanticAIWorkflow[ToolRequest]):
+    pass
+
+
+@workflow
+class WorkflowToolWorkflow(PydanticAIWorkflow[WorkflowToolRequest]):
     @staticmethod
     @workflow_tool_agent.tool_plain(metadata={"waymark": False})
     async def pause() -> str:
@@ -90,11 +101,6 @@ class WorkflowToolWorkflow(PydanticAIWorkflow):
         if tool_name == "pause":
             return await self.pause()
         return await self._unsupported_workflow_tool(agent_name, tool_name)
-
-    async def run(self, prompt: str) -> str:
-        result = await self.run_agent("workflow_tool_agent", prompt)
-        return result.output
-
 
 async def drive(agent_name: str) -> tuple[AgentResult, int]:
     transition = None
@@ -138,7 +144,7 @@ def test_tool_round_trip_resumes_across_graph_node_actions() -> None:
 
 
 def test_waymark_executes_compiled_agent_state_machine() -> None:
-    result = asyncio.run(AgentWorkflow().run("answer this"))
+    result = asyncio.run(AgentWorkflow().run(AgentRequest(prompt="answer this")))
 
     assert result == Answer(value="durable")
     ir_text = str(AgentWorkflow.workflow_ir())
@@ -152,7 +158,7 @@ def test_planning_retries_without_a_hard_limit() -> None:
     planning_calls.clear()
     planning_failures[0] = 1
 
-    result = asyncio.run(AgentWorkflow().run("answer this"))
+    result = asyncio.run(AgentWorkflow().run(AgentRequest(prompt="answer this")))
 
     assert result == Answer(value="durable")
     assert planning_calls == ["called", "called"]
@@ -162,7 +168,7 @@ def test_waymark_executes_each_tool_as_its_own_action() -> None:
     tool_calls.clear()
     tool_failures[0] = 0
 
-    result = asyncio.run(ToolWorkflow().run("answer this"))
+    result = asyncio.run(ToolWorkflow().run(ToolRequest(prompt="answer this")))
 
     assert result == '{"lookup":"found"}'
     assert tool_calls == ["a"]
@@ -172,14 +178,16 @@ def test_tool_action_policy_comes_from_tool_metadata() -> None:
     tool_calls.clear()
     tool_failures[0] = 1
 
-    result = asyncio.run(ToolWorkflow().run("answer this"))
+    result = asyncio.run(ToolWorkflow().run(ToolRequest(prompt="answer this")))
 
     assert result == '{"lookup":"found"}'
     assert tool_calls == ["a", "a"]
 
 
 def test_async_tool_can_run_as_compiled_workflow_logic() -> None:
-    result = asyncio.run(WorkflowToolWorkflow().run("answer this"))
+    result = asyncio.run(
+        WorkflowToolWorkflow().run(WorkflowToolRequest(prompt="answer this"))
+    )
 
     assert result == '{"pause":"waited"}'
     pause_ir = next(
@@ -189,6 +197,14 @@ def test_async_tool_can_run_as_compiled_workflow_logic() -> None:
         stmt.sleep_stmt for stmt in pause_ir.body.statements if stmt.HasField("sleep_stmt")
     )
     assert sleep.duration.variable.name == "seconds"
+
+
+def test_request_serializes_agent_by_module_variable() -> None:
+    payload = json.loads(AgentRequest(prompt="answer this").to_json())
+    run_types = get_type_hints(AgentWorkflow.run)
+
+    assert payload["agent_reference"] == f"{__name__}:test_agent"
+    assert run_types == {"request": AgentRequest, "return": Answer}
 
 
 def test_factory_requires_a_name() -> None:

@@ -1,5 +1,6 @@
 import asyncio
-from typing import Never
+from types import FunctionType
+from typing import Any, Generic, Never, TypeVar, cast, get_args, get_origin
 
 from waymark import Workflow
 
@@ -10,8 +11,9 @@ from .actions import (
     run_agent_node,
     run_agent_tool,
 )
+from .request import AIRequestBase
 from .types import (
-    AgentDeps,
+    AgentOutput,
     AgentResult,
     AgentTransition,
     PendingTransition,
@@ -21,69 +23,81 @@ from .types import (
     WorkflowToolArgs,
 )
 
+AIRequestT = TypeVar("AIRequestT", bound=AIRequestBase[Any])
 
-class PydanticAIWorkflow(Workflow):
+
+class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
     """Workflow base that compiles Pydantic AI graph and tool transitions to actions."""
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if "run" in cls.__dict__:
+            return
+        request_type = next(
+            (
+                get_args(base)[0]
+                for base in getattr(cls, "__orig_bases__", ())
+                if get_origin(base) is PydanticAIWorkflow
+            ),
+            None,
+        )
+        output_type = getattr(getattr(request_type, "agent", None), "output_type", None)
+        if not isinstance(request_type, type) or not isinstance(output_type, type):
+            return
+
+        # Waymark uses run()'s concrete return annotation to rebuild Pydantic outputs.
+        run = FunctionType(
+            PydanticAIWorkflow.run.__code__,
+            PydanticAIWorkflow.run.__globals__,
+            name="run",
+        )
+        run.__annotations__ = {"request": request_type, "return": output_type}
+        run.__qualname__ = f"{cls.__qualname__}.run"
+        cls.run = cast(Any, run)
+
+    async def run(self, request: AIRequestT) -> AgentOutput:
+        result = await self.run_agent(request)
+        return result.output
 
     async def run_agent(
         self,
-        agent_name: str,
-        prompt: str | None,
-        message_history: str | None = None,
-        deps: AgentDeps = None,
-        model: str | None = None,
-        conversation_id: str | None = None,
-        run_id: str | None = None,
+        request: AIRequestT,
     ) -> AgentResult:
         transition: AgentTransition | None = None
         tool_results: list[ToolActionResult] = []
         while True:
             transition = await self._next_agent_transition(
-                agent_name,
-                prompt,
+                request,
                 transition,
                 tool_results,
-                message_history,
-                deps,
-                model,
-                conversation_id,
-                run_id,
             )
             if transition.kind == "done":
                 return transition.result
-            await self._handle_agent_approvals(agent_name, transition)
+            await self._handle_agent_approvals(request.agent_reference, transition)
             tool_results = await self._handle_agent_tools(
-                agent_name,
+                request,
                 transition,
-                deps,
-                model,
             )
 
     async def _next_agent_transition(
         self,
-        agent_name: str,
-        prompt: str | None,
+        request: AIRequestT,
         transition: AgentTransition | None,
         tool_results: list[ToolActionResult],
-        message_history: str | None,
-        deps: AgentDeps,
-        model: str | None,
-        conversation_id: str | None,
-        run_id: str | None,
     ) -> AgentTransition:
         while True:
             try:
                 return await self.run_action(
                     run_agent_node(
-                        agent_name,
-                        prompt,
+                        request.agent_reference,
+                        request.prompt,
                         transition,
                         tool_results,
-                        message_history=message_history,
-                        deps=deps,
-                        model=model,
-                        conversation_id=conversation_id,
-                        run_id=run_id,
+                        message_history=request.message_history,
+                        deps=request.deps,
+                        model=request.model,
+                        conversation_id=request.conversation_id,
+                        run_id=request.run_id,
                     )
                 )
             except Exception:
@@ -99,41 +113,35 @@ class PydanticAIWorkflow(Workflow):
 
     async def _handle_agent_tools(
         self,
-        agent_name: str,
+        request: AIRequestT,
         transition: PendingTransition,
-        deps: AgentDeps,
-        model: str | None,
     ) -> list[ToolActionResult]:
         results: list[ToolActionResult] = []
         for tool_call in transition.tool_calls:
             results.append(
                 await self._run_agent_tool_call(
-                    agent_name,
+                    request,
                     transition,
                     tool_call,
-                    deps,
-                    model,
                 )
             )
         return results
 
     async def _run_agent_tool_call(
         self,
-        agent_name: str,
+        request: AIRequestT,
         transition: PendingTransition,
         tool_call: ToolCall,
-        deps: AgentDeps,
-        model: str | None,
     ) -> ToolActionResult:
         if tool_call.waymark is False:
             # metadata={"waymark": False}: execute deterministic, compileable
             # workflow code, such as asyncio.sleep(), outside an action.
             if tool_call.workflow_args is None:
                 return await self._unsupported_workflow_tool(
-                    agent_name, tool_call.call.tool_name
+                    request.agent_reference, tool_call.call.tool_name
                 )
             workflow_value = await self.run_workflow_tool(
-                agent_name,
+                request.agent_reference,
                 tool_call.call.tool_name,
                 tool_call.workflow_args,
             )
@@ -152,11 +160,11 @@ class PydanticAIWorkflow(Workflow):
             try:
                 return await self.run_action(
                     run_agent_tool(
-                        agent_name,
+                        request.agent_reference,
                         transition,
                         tool_call,
-                        deps=deps,
-                        model=model,
+                        deps=request.deps,
+                        model=request.model,
                     )
                 )
             except Exception:

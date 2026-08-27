@@ -32,7 +32,7 @@ normal Pydantic AI tools:
 ```python
 from pydantic import BaseModel
 from pydantic_ai import Agent
-from pydantic_ai_waymark import waymark_agent
+from pydantic_ai_waymark import AIRequestBase, waymark_agent
 
 
 class Reply(BaseModel):
@@ -49,6 +49,10 @@ support_agent = waymark_agent(
         defer_model_check=True,
     )
 )
+
+
+class SupportRequest(AIRequestBase[None]):
+    agent = support_agent
 
 
 @support_agent.tool_plain
@@ -76,7 +80,7 @@ table; calls to `asyncio.sleep()` become durable Waymark timers:
 
 ```python
 @workflow
-class SupportWorkflow(PydanticAIWorkflow):
+class SupportWorkflow(PydanticAIWorkflow[SupportRequest]):
     @staticmethod
     @support_agent.tool_plain(metadata={"waymark": False})
     async def wait_for_follow_up(seconds: float = 45) -> str:
@@ -92,37 +96,37 @@ class SupportWorkflow(PydanticAIWorkflow):
 The explicit dispatch is required because Waymark statically compiles workflow
 calls; it cannot dynamically invoke a Python callable selected by the model.
 
-Define the agent and workflow at module scope so every Waymark worker can
-import the same registration by its stable name.
+The request serializes the agent as its module and variable name, not as a live
+Python object. Define the agent, request, and workflow at module scope so every
+Waymark worker can import the same agent reference.
 
 ## Compile the agent into a workflow
 
-Inherit from `PydanticAIWorkflow` and call `run_agent` from compiled workflow
-code:
+Parameterize `PydanticAIWorkflow` with the request type. The inherited `run`
+method executes the configured agent and returns its output:
 
 ```python
 from waymark import workflow
-from pydantic_ai_waymark import PydanticAIWorkflow
+from pydantic_ai_waymark import AIRequestBase, PydanticAIWorkflow
+
+
+class SupportRequest(AIRequestBase[None]):
+    agent = support_agent
 
 
 @workflow
-class SupportWorkflow(PydanticAIWorkflow):
-    async def run(
-        self,
-        prompt: str,
-        message_history: str | None = None,
-    ) -> Reply:
-        result = await self.run_agent(
-            "support_agent",
-            prompt,
-            message_history=message_history,
-        )
-        return result.output
+class SupportWorkflow(PydanticAIWorkflow[SupportRequest]):
+    pass
+
+
+reply = await SupportWorkflow().run(
+    SupportRequest(prompt="How do I update my account?")
+)
 ```
 
-The result also contains `message_history`, `new_messages`, `usage`, `run_id`,
-and `conversation_id`. Pass `message_history` to a later workflow invocation to
-continue the conversation.
+`AIRequestBase` also accepts `message_history`, `deps`, `model`,
+`conversation_id`, and `run_id`. Its `to_json()` representation includes the
+stable agent reference needed by the worker.
 
 ## Durable boundaries
 

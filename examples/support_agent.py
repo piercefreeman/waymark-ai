@@ -4,7 +4,12 @@ from pydantic import BaseModel
 from pydantic_ai import Agent
 from waymark import workflow
 
-from pydantic_ai_waymark import PydanticAIWorkflow, WorkflowToolArgs, waymark_agent
+from pydantic_ai_waymark import (
+    AIRequestBase,
+    PydanticAIWorkflow,
+    WorkflowToolArgs,
+    waymark_agent,
+)
 
 
 class SupportReply(BaseModel):
@@ -25,6 +30,10 @@ support_agent = waymark_agent(
         defer_model_check=True,
     )
 )
+
+
+class SupportRequest(AIRequestBase[None]):
+    agent = support_agent
 
 
 @support_agent.tool_plain
@@ -52,7 +61,7 @@ def estimate_resolution_time(issue_type: str) -> str:
 
 
 @workflow
-class SupportWorkflow(PydanticAIWorkflow):
+class SupportWorkflow(PydanticAIWorkflow[SupportRequest]):
     @staticmethod
     @support_agent.tool_plain(metadata={"waymark": False})
     async def wait_for_follow_up(seconds: float = 45) -> str:
@@ -69,11 +78,3 @@ class SupportWorkflow(PydanticAIWorkflow):
         if tool_name == "wait_for_follow_up":
             return await self.wait_for_follow_up(args["seconds"])
         return await self._unsupported_workflow_tool(agent_name, tool_name)
-
-    async def run(self, prompt: str, message_history: str | None = None) -> SupportReply:
-        result = await self.run_agent(
-            "support_agent",
-            prompt,
-            message_history=message_history,
-        )
-        return result.output
