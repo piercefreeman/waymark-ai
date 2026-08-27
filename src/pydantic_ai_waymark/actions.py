@@ -12,7 +12,7 @@ from pydantic_ai.exceptions import (
     ToolFailedError,
     ToolRetryError,
 )
-from pydantic_ai.messages import ToolCallPart
+from pydantic_ai.messages import TextPart, ToolCallPart
 from pydantic_graph import End
 from waymark import action
 
@@ -182,6 +182,15 @@ async def run_agent_node(
             state=state_adapter.dump_json(agent_run.ctx.state).decode(),
             node=dump_node(next_node),
             deps_state=dump_deps_state(agent_run),
+            messages=(
+                [
+                    part.content
+                    for part in next_node.model_response.parts
+                    if isinstance(part, TextPart) and part.content
+                ]
+                if isinstance(next_node, _agent_graph.CallToolsNode)
+                else []
+            ),
         )
 
 

@@ -121,6 +121,7 @@ class RunningTransition(WireModel):
     state: str
     node: AgentNodePayload
     deps_state: DepsState
+    messages: list[str] = Field(default_factory=list)
     tool_calls: list[ToolCall] = Field(default_factory=list)
     approvals: list[SerializedToolCall] = Field(default_factory=list)
     tool_metadata: ToolMetadata = Field(default_factory=dict)
