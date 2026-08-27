@@ -25,6 +25,7 @@ from .serialization import (
     dump_tool_call,
     load_node,
     load_tool_call,
+    restore_agent_deps,
     restore_deps_state,
     restore_graph_state,
     state_adapter,
@@ -79,6 +80,7 @@ async def run_agent_node(
     if transition is not None and transition.kind == "done":
         raise RuntimeError("a completed agent transition cannot be resumed")
     agent = registered_agent(agent_name)
+    deps = restore_agent_deps(agent, deps)
     restored_state = (
         state_adapter.validate_json(transition.state) if transition is not None else None
     )
@@ -205,6 +207,7 @@ async def run_agent_tool(
 ) -> ToolActionResult:
     """Execute one validated Pydantic AI tool call as a Waymark action."""
     agent = registered_agent(agent_name)
+    deps = restore_agent_deps(agent, deps)
     state = state_adapter.validate_json(transition.state)
     node = load_node(transition.node)
     assert isinstance(node, _agent_graph.CallToolsNode)

@@ -6,7 +6,7 @@ import httpx
 import pytest
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ValidationError
-from pydantic_ai import Agent, ModelMessagesTypeAdapter
+from pydantic_ai import Agent, ModelMessagesTypeAdapter, RunContext
 from pydantic_ai.exceptions import ModelAPIError, ModelRetry
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.test import TestModel
@@ -43,6 +43,10 @@ class Answer(BaseModel):
     value: str
 
 
+class AgentDependencies(BaseModel):
+    value: str
+
+
 test_agent = waymark_agent(
     Agent(
         TestModel(custom_output_args={"value": "durable"}),
@@ -71,6 +75,13 @@ tool_failures = [0]
 tool_failure_kind = ["retry"]
 tool_agent = waymark_agent(Agent(TestModel(call_tools=["lookup"]), name="tool_agent"))
 sleep_agent = waymark_agent(Agent(TestModel(call_tools=["pause"]), name="sleep_agent"))
+dependency_agent = waymark_agent(
+    Agent(
+        TestModel(call_tools=["read_dependency"]),
+        name="dependency_agent",
+        deps_type=AgentDependencies,
+    )
+)
 parallel_events: list[str] = []
 parallel_agent = waymark_agent(
     Agent(
@@ -111,6 +122,12 @@ def lookup(query: str) -> str:
 @sleep_agent.tool_plain
 def pause() -> str:
     raise DurableSleep(0.001, result="waited")
+
+
+@dependency_agent.tool
+def read_dependency(ctx: RunContext[AgentDependencies]) -> str:
+    assert isinstance(ctx.deps, AgentDependencies)
+    return ctx.deps.value
 
 
 async def record_tool(name: str) -> str:
@@ -163,6 +180,10 @@ class ToolRequest(AIRequestBase[None]):
 
 class SleepRequest(AIRequestBase[None]):
     agent = sleep_agent
+
+
+class DependencyRequest(AIRequestBase[AgentDependencies]):
+    agent = dependency_agent
 
 
 class ParallelRequest(AIRequestBase[None]):
@@ -253,8 +274,14 @@ class HookWorkflow(PydanticAIWorkflow[ToolRequest]):
 
 
 @workflow
-class SleepWorkflow(PydanticAIWorkflow[SleepRequest]):
+class TestSleepWorkflow(PydanticAIWorkflow[SleepRequest]):
     async def run(self, request: SleepRequest) -> str:
+        return (await self.run_agent(request)).output
+
+
+@workflow
+class DependencyWorkflow(PydanticAIWorkflow[DependencyRequest]):
+    async def run(self, request: DependencyRequest) -> str:
         return (await self.run_agent(request)).output
 
 
@@ -575,6 +602,19 @@ def test_workflow_lifecycle_hooks_can_be_overridden() -> None:
     assert hook_events[3][1:] == ("answer this", None, '{"lookup":"found"}')
 
 
+def test_agent_dependencies_are_restored_after_waymark_serialization() -> None:
+    result = asyncio.run(
+        DependencyWorkflow().run(
+            DependencyRequest(
+                prompt="read it",
+                deps=AgentDependencies(value="typed dependency"),
+            )
+        )
+    )
+
+    assert result == '{"read_dependency":"typed dependency"}'
+
+
 def test_pydantic_tool_retry_survives_across_waymark_actions() -> None:
     tool_failures[0] = 1
 
@@ -609,11 +649,13 @@ def test_pydantic_tool_timeout_uses_its_retry_budget() -> None:
 
 
 def test_tool_can_request_a_durable_workflow_sleep() -> None:
-    result = asyncio.run(SleepWorkflow().run(SleepRequest(prompt="answer this")))
+    result = asyncio.run(TestSleepWorkflow().run(SleepRequest(prompt="answer this")))
 
     assert result == '{"pause":"waited"}'
     tool_ir = next(
-        fn for fn in SleepWorkflow.workflow_ir().functions if fn.name == "_run_agent_tool_call"
+        fn
+        for fn in TestSleepWorkflow.workflow_ir().functions
+        if fn.name == "_run_agent_tool_call"
     )
     tool_ir_text = str(tool_ir)
     assert "sleep_stmt" in tool_ir_text

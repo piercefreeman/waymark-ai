@@ -1,7 +1,7 @@
 import asyncio
 
-from pydantic import BaseModel
-from pydantic_ai import Agent
+from pydantic import BaseModel, Field
+from pydantic_ai import Agent, RunContext
 from waymark import action, workflow
 
 from pydantic_ai_waymark import (
@@ -28,14 +28,17 @@ class ParallelSupportReply(BaseModel):
     review: ReviewReply
 
 
+class SleepDependencies(BaseModel):
+    seconds: float = Field(default=5, ge=0, le=60)
+
+
 support_agent = waymark_agent(
     Agent(
         "openai:gpt-5.2",
         name="support_agent",
         instructions=(
             "Call lookup_support_policy, inspect_account_context, and estimate_resolution_time "
-            "before answering. Then call wait_for_follow_up with seconds=45. "
-            "Answer concisely and escalate when account access is required."
+            "before answering. Answer concisely and escalate when account access is required."
         ),
         output_type=SupportReply,
         defer_model_check=True,
@@ -54,6 +57,16 @@ review_agent = waymark_agent(
     )
 )
 
+sleep_agent = waymark_agent(
+    Agent(
+        "openai:gpt-5.2",
+        name="sleep_agent",
+        deps_type=SleepDependencies,
+        instructions="Call simulate_processing exactly once, then briefly confirm completion.",
+        defer_model_check=True,
+    )
+)
+
 
 class SupportRequest(AIRequestBase[None]):
     agent = support_agent
@@ -61,6 +74,10 @@ class SupportRequest(AIRequestBase[None]):
 
 class ReviewRequest(AIRequestBase[None]):
     agent = review_agent
+
+
+class SleepRequest(AIRequestBase[SleepDependencies]):
+    agent = sleep_agent
 
 
 @support_agent.tool_plain
@@ -87,15 +104,22 @@ def estimate_resolution_time(issue_type: str) -> str:
     return f"Typical resolution window for {issue_type}: 1-3 business days after review."
 
 
-@support_agent.tool_plain
-def wait_for_follow_up(seconds: float = 45) -> str:
-    """Wait durably before returning the support answer."""
-    raise DurableSleep(seconds, result="Follow-up wait completed.")
+@sleep_agent.tool
+def simulate_processing(ctx: RunContext[SleepDependencies]) -> str:
+    """Wait for the configured processing duration."""
+    seconds = ctx.deps.seconds
+    raise DurableSleep(seconds, result=f"Processing completed after {seconds:g} seconds.")
 
 
 @workflow
 class SupportWorkflow(PydanticAIWorkflow[SupportRequest]):
-    async def run(self, request: SupportRequest) -> SupportReply:
+    async def run(self, request: SupportRequest) -> AgentResult:
+        return await self.run_agent(request)
+
+
+@workflow
+class SleepWorkflow(PydanticAIWorkflow[SleepRequest]):
+    async def run(self, request: SleepRequest) -> str:
         return (await self.run_agent(request)).output
 
 
