@@ -200,9 +200,17 @@ docker compose -f examples/docker-compose.yml down -v
 
 ## Lifecycle hooks
 
-`PydanticAIWorkflow` provides no-op `on_agent_start`, `on_agent_end`, `on_message`,
-`on_tool_start`, and `on_tool_end` methods. Override only the hooks you need. Put
-database or websocket I/O in a Waymark action so the side effect remains durable:
+Sometimes you want to keep users informed about an agent's progress. The easiest
+way to do that is to register hooks for state changes, such as when an agent receives
+a tool call and when that tool finishes. This mirrors agent harnesses like Codex and
+Claude Code, which show the currently running tool in shimmering text beneath the
+conversation history.
+
+Use these hooks to save the current state to a database for polling, or push updates
+through a websocket service for broadcast, as shown below. `PydanticAIWorkflow`
+provides no-op `on_agent_start`, `on_agent_end`, `on_message`, `on_tool_start`, and
+`on_tool_end` methods. Override only the hooks you need, and put external I/O in a
+Waymark action so the side effect remains durable:
 
 ```python
 from typing import Any
