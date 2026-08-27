@@ -26,8 +26,9 @@ uv sync --extra openai
 
 ## Define an agent
 
-Define and register a normal module-level Pydantic AI agent. Its tools remain
-normal Pydantic AI tools:
+This library wraps your existing Pydantic AI agents, so define agents and tools
+as you normally would. The only change is to wrap the completed `Agent(...)`
+initialization in `waymark_agent(...)`:
 
 ```python
 from pydantic import BaseModel
