@@ -62,18 +62,19 @@ def lookup_policy(topic: str) -> str:
     return f"Policy for {topic}: escalate account changes."
 ```
 
-Set Waymark's action policy on the Pydantic tool definition:
+Use Pydantic AI's existing retry and timeout settings as usual:
 
 ```python
 @support_agent.tool_plain(
-    metadata={"waymark": {"attempts": 3, "backoff_seconds": 2, "timeout": 120}}
+    retries=3,
+    timeout=120,
 )
 def lookup_policy(topic: str) -> str:
     return f"Policy for {topic}: escalate account changes."
 ```
 
-These values control Waymark action attempts. Pydantic AI's `retries=` and
-`timeout=` arguments remain model-facing tool retry settings.
+Timeouts and `ModelRetry` responses follow Pydantic AI's retry flow across
+durable Waymark actions. Other exceptions fail the workflow immediately.
 
 Tools run in parallel by default. Pydantic AI's `sequential=True` flag is a
 barrier: earlier tools finish first, the sequential tool runs alone, and later

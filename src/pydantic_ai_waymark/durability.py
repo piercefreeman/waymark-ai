@@ -1,7 +1,6 @@
 import math
 from typing import Never
 
-from pydantic import ValidationError
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import (
     AbstractCapability,
@@ -9,11 +8,11 @@ from pydantic_ai.capabilities import (
     WrapToolExecuteHandler,
 )
 from pydantic_ai.capabilities.abstract import CapabilityOrdering
-from pydantic_ai.exceptions import CallDeferred, UserError
+from pydantic_ai.exceptions import CallDeferred
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.tools import DeferredToolRequests, ToolDefinition
 
-from .types import AgentDeps, ToolValue, WaymarkToolPolicy
+from .types import AgentDeps, ToolValue
 
 
 class DurableSleep(CallDeferred):
@@ -25,28 +24,10 @@ class DurableSleep(CallDeferred):
             raise ValueError("sleep duration must be finite and non-negative")
         self.seconds = seconds
         self.result = result
-        super().__init__(
-            metadata={
-                "waymark": {
-                    "kind": "sleep",
-                    "seconds": seconds,
-                    "result": result,
-                }
-            }
-        )
+        super().__init__()
 
     def __reduce__(self) -> tuple[type, tuple[float, ToolValue]]:
         return type(self), (self.seconds, self.result)
-
-
-def _tool_policy(tool_def: ToolDefinition) -> WaymarkToolPolicy:
-    metadata = tool_def.metadata or {}
-    policy = metadata.get("waymark", {})
-    try:
-        return WaymarkToolPolicy.model_validate(policy)
-    except ValidationError as error:
-        message = f"Tool {tool_def.name!r} has invalid 'waymark' metadata: {error}"
-        raise UserError(message) from error
 
 
 class PendingToolCallsError(Exception):
@@ -73,13 +54,8 @@ class WaymarkToolBoundary(AbstractCapability[AgentDeps]):
         args: ValidatedToolArgs,
         handler: WrapToolExecuteHandler,
     ) -> Never:
-        del ctx, call, handler
-        policy = _tool_policy(tool_def)
-        metadata: dict[str, object] = {
-            "waymark": policy,
-            "waymark_sequential": tool_def.sequential,
-        }
-        raise CallDeferred(metadata=metadata)
+        del ctx, call, tool_def, handler
+        raise CallDeferred()
 
     async def handle_deferred_tool_calls(
         self,

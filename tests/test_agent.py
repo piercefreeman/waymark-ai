@@ -7,7 +7,7 @@ import pytest
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ValidationError
 from pydantic_ai import Agent, ModelMessagesTypeAdapter
-from pydantic_ai.exceptions import ModelAPIError
+from pydantic_ai.exceptions import ModelAPIError, ModelRetry
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.providers.openai import OpenAIProvider
@@ -54,6 +54,7 @@ def transient_planning() -> str:
 
 tool_calls: list[str] = []
 tool_failures = [0]
+tool_failure_kind = ["retry"]
 tool_agent = waymark_agent(Agent(TestModel(call_tools=["lookup"]), name="tool_agent"))
 sleep_agent = waymark_agent(Agent(TestModel(call_tools=["pause"]), name="sleep_agent"))
 parallel_events: list[str] = []
@@ -76,25 +77,21 @@ http_agent = waymark_agent(
 approval_agent = waymark_agent(
     Agent(TestModel(call_tools=["delete_record"]), name="approval_agent")
 )
-unsupported_metadata_agent = waymark_agent(
-    Agent(TestModel(call_tools=["unsupported_metadata"]), name="unsupported_metadata_agent")
-)
 timeout_agent = waymark_agent(
     Agent(TestModel(call_tools=["slow_tool"]), name="timeout_agent")
 )
 approval_calls: list[str] = []
-unsupported_metadata_calls: list[str] = []
 timeout_calls: list[str] = []
 
 
-@tool_agent.tool_plain(
-    metadata={"waymark": {"attempts": 2, "backoff_seconds": 0, "timeout": 10}}
-)
+@tool_agent.tool_plain(retries=1, timeout=10)
 def lookup(query: str) -> str:
     tool_calls.append(query)
     if tool_failures[0]:
         tool_failures[0] -= 1
-        raise RuntimeError("transient lookup failure")
+        if tool_failure_kind[0] == "retry":
+            raise ModelRetry("transient lookup failure")
+        raise RuntimeError("permanent lookup failure")
     return "found"
 
 
@@ -136,15 +133,7 @@ def delete_record() -> str:
     return "deleted"
 
 
-@unsupported_metadata_agent.tool_plain(metadata={"waymark": False})
-def unsupported_metadata() -> str:
-    unsupported_metadata_calls.append("called")
-    return "unsupported"
-
-
-@timeout_agent.tool_plain(
-    metadata={"waymark": {"attempts": 2, "backoff_seconds": 0, "timeout": 0.001}}
-)
+@timeout_agent.tool_plain(retries=1, timeout=0.001)
 async def slow_tool() -> str:
     timeout_calls.append("called")
     await asyncio.sleep(0.01)
@@ -173,10 +162,6 @@ class HttpRequest(AIRequestBase[None]):
 
 class ApprovalRequest(AIRequestBase[None]):
     agent = approval_agent
-
-
-class UnsupportedMetadataRequest(AIRequestBase[None]):
-    agent = unsupported_metadata_agent
 
 
 class TimeoutRequest(AIRequestBase[None]):
@@ -220,12 +205,6 @@ class ApprovalWorkflow(PydanticAIWorkflow[ApprovalRequest]):
 
 
 @workflow
-class UnsupportedMetadataWorkflow(PydanticAIWorkflow[UnsupportedMetadataRequest]):
-    async def run(self, request: UnsupportedMetadataRequest) -> str:
-        return (await self.run_agent(request)).output
-
-
-@workflow
 class TimeoutWorkflow(PydanticAIWorkflow[TimeoutRequest]):
     async def run(self, request: TimeoutRequest) -> str:
         return (await self.run_agent(request)).output
@@ -265,9 +244,9 @@ def reset_mutable_test_state() -> None:
     planning_failure_kind[0] = "transient"
     planning_calls.clear()
     tool_failures[0] = 0
+    tool_failure_kind[0] = "retry"
     tool_calls.clear()
     approval_calls.clear()
-    unsupported_metadata_calls.clear()
     timeout_calls.clear()
 
 
@@ -510,13 +489,23 @@ def test_waymark_executes_each_tool_as_its_own_action() -> None:
     assert tool_calls == ["a"]
 
 
-def test_tool_action_policy_comes_from_tool_metadata() -> None:
+def test_pydantic_tool_retry_survives_across_waymark_actions() -> None:
     tool_failures[0] = 1
 
     result = asyncio.run(ToolWorkflow().run(ToolRequest(prompt="answer this")))
 
     assert result == '{"lookup":"found"}'
     assert tool_calls == ["a", "a"]
+
+
+def test_unhandled_tool_exception_fails_without_retry() -> None:
+    tool_failures[0] = 1
+    tool_failure_kind[0] = "error"
+
+    with pytest.raises(RuntimeError, match="permanent lookup failure"):
+        asyncio.run(ToolWorkflow().run(ToolRequest(prompt="answer this")))
+
+    assert tool_calls == ["a"]
 
 
 def test_approval_required_tool_stops_before_its_body_runs() -> None:
@@ -526,19 +515,8 @@ def test_approval_required_tool_stops_before_its_body_runs() -> None:
     assert approval_calls == []
 
 
-def test_waymark_false_tool_metadata_is_rejected_before_execution() -> None:
-    with pytest.raises(RuntimeError, match="invalid 'waymark' metadata"):
-        asyncio.run(
-            UnsupportedMetadataWorkflow().run(
-                UnsupportedMetadataRequest(prompt="run the tool")
-            )
-        )
-
-    assert unsupported_metadata_calls == []
-
-
-def test_tool_timeout_retries_only_to_its_configured_attempts() -> None:
-    with pytest.raises(RuntimeError, match="failed after 2 Waymark attempts"):
+def test_pydantic_tool_timeout_uses_its_retry_budget() -> None:
+    with pytest.raises(RuntimeError, match="exceeded max retries count of 1"):
         asyncio.run(TimeoutWorkflow().run(TimeoutRequest(prompt="run the tool")))
 
     assert timeout_calls == ["called", "called"]

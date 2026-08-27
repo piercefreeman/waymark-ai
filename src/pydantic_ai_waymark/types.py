@@ -79,17 +79,8 @@ class SerializedToolCall(WireModel):
     part_kind: Literal["tool-call"]
 
 
-class WaymarkToolPolicy(WireModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    attempts: int = Field(default=3, ge=1)
-    backoff_seconds: float = Field(default=2.0, ge=0)
-    timeout: float = Field(default=120.0, gt=0)
-
-
 class ToolCall(WireModel):
     call: SerializedToolCall
-    waymark: WaymarkToolPolicy
     sequential: bool = False
 
 

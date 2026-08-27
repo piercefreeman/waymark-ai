@@ -7,7 +7,6 @@ from .actions import (
     RetryableAgentError,
     raise_approval_required,
     raise_model_attempts_exhausted,
-    raise_tool_attempts_exhausted,
     resolve_parallel_tool_results,
     run_agent_node,
     run_agent_tool,
@@ -193,30 +192,18 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
         """Dispatch one tool call through its configured durability boundary.
 
         Tool handling calls this directly for sequential calls and through a segment
-        otherwise; each call runs as a separately persisted, retried Waymark action.
+        otherwise; each call runs as a separately persisted Waymark action while
+        Pydantic AI applies the tool's native retry and timeout settings.
         """
-        tool_attempt = 0
-        action_result: ToolActionResult | None = None
-        while True:
-            tool_attempt += 1
-            try:
-                action_result = await self.run_action(
-                    run_agent_tool(
-                        request.agent_reference,
-                        transition,
-                        tool_call,
-                        deps=request.deps,
-                        model=request.model,
-                    )
-                )
-                break
-            except Exception:
-                if tool_attempt >= tool_call.waymark.attempts:
-                    await raise_tool_attempts_exhausted(
-                        tool_call.call.tool_name, tool_attempt
-                    )
-                if tool_call.waymark.backoff_seconds > 0.0:
-                    await asyncio.sleep(tool_call.waymark.backoff_seconds)
+        action_result = await self.run_action(
+            run_agent_tool(
+                request.agent_reference,
+                transition,
+                tool_call,
+                deps=request.deps,
+                model=request.model,
+            )
+        )
 
         if action_result["kind"] == "sleep":
             sleep_seconds = action_result["seconds"]

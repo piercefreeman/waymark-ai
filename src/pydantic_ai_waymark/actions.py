@@ -1,5 +1,3 @@
-import asyncio
-from collections.abc import Mapping
 from typing import Never, cast
 
 from pydantic import TypeAdapter
@@ -48,7 +46,6 @@ from .types import (
     ToolMetadata,
     ToolsTransition,
     UsagePayload,
-    WaymarkToolPolicy,
 )
 
 tool_metadata_adapter = TypeAdapter(dict[str, JsonValue])
@@ -58,16 +55,9 @@ class RetryableAgentError(RuntimeError):
     """A transient provider failure that may safely rerun its graph-node action."""
 
 
-def _pending_tool_call(call: ToolCallPart, metadata: Mapping[str, object]) -> ToolCall:
-    policy = metadata.get("waymark")
-    sequential = metadata.get("waymark_sequential", False)
-    if not isinstance(sequential, bool):
-        raise RuntimeError(f"tool {call.tool_name!r} has an invalid sequential flag")
-    if policy is None:
-        raise RuntimeError(f"tool {call.tool_name!r} has no Waymark action policy")
+def _pending_tool_call(call: ToolCallPart, *, sequential: bool) -> ToolCall:
     return ToolCall(
         call=dump_tool_call(call),
-        waymark=WaymarkToolPolicy.model_validate(policy),
         sequential=sequential,
     )
 
@@ -132,20 +122,24 @@ async def run_agent_node(
             call_tools_node.tool_call_metadata = (
                 transition.tool_metadata if transition is not None else {}
             )
+            # Supplied deferred results bypass Pydantic AI's local tool executor, so
+            # mirror its retry bookkeeping before advancing to the next run step.
+            for result in tool_results:
+                if result["kind"] in {"retry_prompt", "model_retry"}:
+                    agent_run.ctx.deps.tool_manager.failed_tools.add(result["tool_name"])
+                elif result["kind"] == "return":
+                    agent_run.ctx.deps.tool_manager.succeeded_tools.add(
+                        result["tool_name"]
+                    )
 
         try:
             next_node = await agent_run.next(node)
         except PendingToolCallsError as pending:
             tool_metadata: ToolMetadata = {}
             for tool_call_id, metadata in pending.requests.metadata.items():
-                remaining = {
-                    key: value
-                    for key, value in metadata.items()
-                    if key not in {"waymark", "waymark_sequential"}
-                }
-                if remaining:
+                if metadata:
                     tool_metadata[tool_call_id] = tool_metadata_adapter.validate_python(
-                        remaining
+                        metadata
                     )
             return ToolsTransition(
                 kind="tools",
@@ -153,7 +147,10 @@ async def run_agent_node(
                 node=dump_node(cast(PersistedPydanticNode, node)),
                 deps_state=dump_deps_state(agent_run),
                 tool_calls=[
-                    _pending_tool_call(call, pending.requests.metadata[call.tool_call_id])
+                    _pending_tool_call(
+                        call,
+                        sequential=agent_run.ctx.deps.tool_manager.is_sequential(call),
+                    )
                     for call in pending.requests.calls
                 ],
                 approvals=[dump_tool_call(call) for call in pending.requests.approvals],
@@ -204,7 +201,6 @@ async def run_agent_tool(
     model: str | None = None,
 ) -> ToolActionResult:
     """Execute one validated Pydantic AI tool call as a Waymark action."""
-    policy = tool_call.waymark
     agent = registered_agent(agent_name)
     state = state_adapter.validate_json(transition.state)
     node = load_node(transition.node)
@@ -222,8 +218,7 @@ async def run_agent_tool(
         await restore_deps_state(agent_run, transition.deps_state)
         metadata = transition.tool_metadata.get(call.tool_call_id)
         try:
-            async with asyncio.timeout(policy.timeout):
-                value = await agent_run.ctx.deps.tool_manager.handle_call(call, metadata=metadata)
+            value = await agent_run.ctx.deps.tool_manager.handle_call(call, metadata=metadata)
         except ToolRetryError as error:
             return {
                 "kind": "retry_prompt",
@@ -272,12 +267,6 @@ async def run_agent_tool(
             "tool_name": call.tool_name,
             "value": value,
         }
-
-
-@action(name="pydantic_ai_agent_tool_attempts_exhausted")
-async def raise_tool_attempts_exhausted(tool_name: str, attempts: int) -> Never:
-    raise RuntimeError(f"tool {tool_name!r} failed after {attempts} Waymark attempts")
-
 
 @action(name="pydantic_ai_agent_model_attempts_exhausted")
 async def raise_model_attempts_exhausted(attempts: int) -> Never:
