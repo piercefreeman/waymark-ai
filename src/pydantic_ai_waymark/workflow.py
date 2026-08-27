@@ -155,10 +155,11 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
         # Default or metadata={"waymark": {...}}: execute side-effecting tool
         # code as an action, using the retry policy validated into this model.
         tool_attempt = 0
+        action_result: ToolActionResult | None = None
         while True:
             tool_attempt += 1
             try:
-                return await self.run_action(
+                action_result = await self.run_action(
                     run_agent_tool(
                         request.agent_reference,
                         transition,
@@ -167,6 +168,7 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
                         model=request.model,
                     )
                 )
+                break
             except Exception:
                 if tool_attempt >= tool_call.waymark.attempts:
                     await raise_tool_attempts_exhausted(
@@ -174,6 +176,17 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
                     )
                 if tool_call.waymark.backoff_seconds > 0.0:
                     await asyncio.sleep(tool_call.waymark.backoff_seconds)
+
+        if action_result["kind"] == "sleep":
+            sleep_seconds = action_result["seconds"]
+            await asyncio.sleep(sleep_seconds)
+            return {
+                "kind": "return",
+                "tool_call_id": action_result["tool_call_id"],
+                "tool_name": action_result["tool_name"],
+                "value": action_result["value"],
+            }
+        return action_result
 
     async def run_workflow_tool(
         self,

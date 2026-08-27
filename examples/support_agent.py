@@ -1,13 +1,11 @@
-import asyncio
-
 from pydantic import BaseModel
 from pydantic_ai import Agent
 from waymark import workflow
 
 from pydantic_ai_waymark import (
     AIRequestBase,
+    DurableSleep,
     PydanticAIWorkflow,
-    WorkflowToolArgs,
     waymark_agent,
 )
 
@@ -60,21 +58,12 @@ def estimate_resolution_time(issue_type: str) -> str:
     return f"Typical resolution window for {issue_type}: 1-3 business days after review."
 
 
+@support_agent.tool_plain
+def wait_for_follow_up(seconds: float = 45) -> str:
+    """Wait durably before returning the support answer."""
+    raise DurableSleep(seconds, result="Follow-up wait completed.")
+
+
 @workflow
 class SupportWorkflow(PydanticAIWorkflow[SupportRequest]):
-    @staticmethod
-    @support_agent.tool_plain(metadata={"waymark": False})
-    async def wait_for_follow_up(seconds: float = 45) -> str:
-        """Wait durably before returning the support answer."""
-        await asyncio.sleep(seconds)
-        return "Follow-up wait completed."
-
-    async def run_workflow_tool(
-        self,
-        agent_name: str,
-        tool_name: str,
-        args: WorkflowToolArgs,
-    ) -> str:
-        if tool_name == "wait_for_follow_up":
-            return await self.wait_for_follow_up(args["seconds"])
-        return await self._unsupported_workflow_tool(agent_name, tool_name)
+    pass

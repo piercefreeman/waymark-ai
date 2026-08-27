@@ -11,8 +11,8 @@ from waymark import workflow
 from pydantic_ai_waymark import (
     AgentResult,
     AIRequestBase,
+    DurableSleep,
     PydanticAIWorkflow,
-    WorkflowToolArgs,
     run_agent_node,
     run_agent_tool,
     waymark_agent,
@@ -45,9 +45,7 @@ def transient_planning() -> str:
 tool_calls: list[str] = []
 tool_failures = [0]
 tool_agent = waymark_agent(Agent(TestModel(call_tools=["lookup"]), name="tool_agent"))
-workflow_tool_agent = waymark_agent(
-    Agent(TestModel(call_tools=["pause"]), name="workflow_tool_agent")
-)
+sleep_agent = waymark_agent(Agent(TestModel(call_tools=["pause"]), name="sleep_agent"))
 
 
 @tool_agent.tool_plain(
@@ -61,6 +59,11 @@ def lookup(query: str) -> str:
     return "found"
 
 
+@sleep_agent.tool_plain
+def pause() -> str:
+    raise DurableSleep(0.001, result="waited")
+
+
 class AgentRequest(AIRequestBase[None]):
     agent = test_agent
 
@@ -69,8 +72,8 @@ class ToolRequest(AIRequestBase[None]):
     agent = tool_agent
 
 
-class WorkflowToolRequest(AIRequestBase[None]):
-    agent = workflow_tool_agent
+class SleepRequest(AIRequestBase[None]):
+    agent = sleep_agent
 
 
 @workflow
@@ -84,23 +87,9 @@ class ToolWorkflow(PydanticAIWorkflow[ToolRequest]):
 
 
 @workflow
-class WorkflowToolWorkflow(PydanticAIWorkflow[WorkflowToolRequest]):
-    @staticmethod
-    @workflow_tool_agent.tool_plain(metadata={"waymark": False})
-    async def pause() -> str:
-        seconds = 0.001
-        await asyncio.sleep(seconds)
-        return "waited"
+class SleepWorkflow(PydanticAIWorkflow[SleepRequest]):
+    pass
 
-    async def run_workflow_tool(
-        self,
-        agent_name: str,
-        tool_name: str,
-        args: WorkflowToolArgs,
-    ) -> str:
-        if tool_name == "pause":
-            return await self.pause()
-        return await self._unsupported_workflow_tool(agent_name, tool_name)
 
 async def drive(agent_name: str) -> tuple[AgentResult, int]:
     transition = None
@@ -184,19 +173,16 @@ def test_tool_action_policy_comes_from_tool_metadata() -> None:
     assert tool_calls == ["a", "a"]
 
 
-def test_async_tool_can_run_as_compiled_workflow_logic() -> None:
-    result = asyncio.run(
-        WorkflowToolWorkflow().run(WorkflowToolRequest(prompt="answer this"))
-    )
+def test_tool_can_request_a_durable_workflow_sleep() -> None:
+    result = asyncio.run(SleepWorkflow().run(SleepRequest(prompt="answer this")))
 
     assert result == '{"pause":"waited"}'
-    pause_ir = next(
-        fn for fn in WorkflowToolWorkflow.workflow_ir().functions if fn.name == "pause"
+    tool_ir = next(
+        fn for fn in SleepWorkflow.workflow_ir().functions if fn.name == "_run_agent_tool_call"
     )
-    sleep = next(
-        stmt.sleep_stmt for stmt in pause_ir.body.statements if stmt.HasField("sleep_stmt")
-    )
-    assert sleep.duration.variable.name == "seconds"
+    tool_ir_text = str(tool_ir)
+    assert "sleep_stmt" in tool_ir_text
+    assert 'name: "sleep_seconds"' in tool_ir_text
 
 
 def test_request_serializes_agent_by_module_variable() -> None:

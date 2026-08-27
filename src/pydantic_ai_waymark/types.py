@@ -180,10 +180,17 @@ class DeferredToolResultPayload(ToolResultBase):
     kind: Literal["deferred"]
 
 
+class DurableSleepResult(ToolResultBase):
+    kind: Literal["sleep"]
+    seconds: float
+    value: ToolValue
+
+
 ToolActionResult: TypeAlias = (
     ToolReturnResult
     | ModelRetryResult
     | ToolFailedResult
     | RetryPromptResult
     | DeferredToolResultPayload
+    | DurableSleepResult
 )

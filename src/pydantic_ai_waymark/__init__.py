@@ -1,6 +1,7 @@
 from .agent import (
     AgentResult,
     AIRequestBase,
+    DurableSleep,
     PydanticAIWorkflow,
     WorkflowToolArgs,
     run_agent_node,
@@ -11,6 +12,7 @@ from .agent import (
 __all__ = [
     "AIRequestBase",
     "AgentResult",
+    "DurableSleep",
     "PydanticAIWorkflow",
     "WorkflowToolArgs",
     "run_agent_node",

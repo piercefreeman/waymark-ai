@@ -74,27 +74,18 @@ def lookup_policy(topic: str) -> str:
 These values control Waymark action attempts. Pydantic AI's `retries=` and
 `timeout=` arguments remain model-facing tool retry settings.
 
-Declare a deterministic workflow tool once on the workflow and decorate it
-directly with the agent. `run_workflow_tool` is the compiler-visible dispatch
-table; calls to `asyncio.sleep()` become durable Waymark timers:
+To let a tool request a durable wait, raise `DurableSleep`. The tool action
+records the request, the workflow performs the timer, and the supplied result
+is returned to the model under the original tool-call ID:
 
 ```python
-@workflow
-class SupportWorkflow(PydanticAIWorkflow[SupportRequest]):
-    @staticmethod
-    @support_agent.tool_plain(metadata={"waymark": False})
-    async def wait_for_follow_up(seconds: float = 45) -> str:
-        await asyncio.sleep(seconds)
-        return "Follow-up wait completed."
+from pydantic_ai_waymark import DurableSleep
 
-    async def run_workflow_tool(self, agent_name, tool_name, args):
-        if tool_name == "wait_for_follow_up":
-            return await self.wait_for_follow_up(args["seconds"])
-        return await self._unsupported_workflow_tool(agent_name, tool_name)
+
+@support_agent.tool_plain
+def wait_for_follow_up(seconds: float = 45) -> str:
+    raise DurableSleep(seconds, result="Follow-up wait completed.")
 ```
-
-The explicit dispatch is required because Waymark statically compiles workflow
-calls; it cannot dynamically invoke a Python callable selected by the model.
 
 The request serializes the agent as its module and variable name, not as a live
 Python object. Define the agent, request, and workflow at module scope so every
@@ -156,10 +147,15 @@ adapter-level timeout; model request timeouts come from Pydantic AI's
 `ModelSettings` or the provider client. Tool actions remain bounded by their
 `metadata["waymark"]` policy because they may have side effects.
 
-Tools marked with `metadata={"waymark": False}` dispatch through
-`run_workflow_tool` instead of `pydantic_ai_agent_tool`. Waymark compiles that
-method, including `await asyncio.sleep(...)`, so no worker is occupied and a
-restart during the wait resumes at the timer deadline.
+`DurableSleep` subclasses Pydantic AI's `CallDeferred`. The tool body raises it
+inside `pydantic_ai_agent_tool`; the action returns a typed sleep request rather
+than failing. Waymark then executes `asyncio.sleep(...)` at workflow level, so
+no worker is occupied and a restart resumes at the timer deadline. Afterward,
+the requested value is applied through `DeferredToolResults` like a normal tool
+return.
+
+Other deterministic workflow-native tools can still use
+`metadata={"waymark": False}` and a compiled `run_workflow_tool` dispatcher.
 
 The graph-state wire format currently relies on Pydantic AI's private graph
 types, so the dependency is deliberately pinned to the `2.21.x` line. Upgrade
@@ -180,7 +176,7 @@ docker compose -f examples/docker-compose.yml up --build
 Open [http://localhost:8000](http://localhost:8000). The Waymark dashboard is at
 [http://localhost:24119](http://localhost:24119).
 
-The example agent calls three action tools and one workflow-level sleep tool. A
+The example agent calls three action tools and one `DurableSleep` tool. A
 request visibly exercises model actions, separate tool actions, a 45-second
 durable timer, and the resumed model action.
 

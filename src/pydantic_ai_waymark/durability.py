@@ -1,3 +1,4 @@
+import math
 from typing import Literal, Never
 
 from pydantic import TypeAdapter, ValidationError
@@ -12,9 +13,32 @@ from pydantic_ai.exceptions import CallDeferred, UserError
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.tools import DeferredToolRequests, ToolDefinition
 
-from .types import AgentDeps, WaymarkToolPolicy, WorkflowToolArgs
+from .types import AgentDeps, ToolValue, WaymarkToolPolicy, WorkflowToolArgs
 
 workflow_args_adapter = TypeAdapter(WorkflowToolArgs)
+
+
+class DurableSleep(CallDeferred):
+    """Ask the enclosing Waymark workflow to wait before returning this tool result."""
+
+    def __init__(self, seconds: float, result: ToolValue = "Sleep completed.") -> None:
+        seconds = float(seconds)
+        if not math.isfinite(seconds) or seconds < 0:
+            raise ValueError("sleep duration must be finite and non-negative")
+        self.seconds = seconds
+        self.result = result
+        super().__init__(
+            metadata={
+                "waymark": {
+                    "kind": "sleep",
+                    "seconds": seconds,
+                    "result": result,
+                }
+            }
+        )
+
+    def __reduce__(self) -> tuple[type, tuple[float, ToolValue]]:
+        return type(self), (self.seconds, self.result)
 
 
 def _tool_policy(tool_def: ToolDefinition) -> WaymarkToolPolicy | Literal[False]:

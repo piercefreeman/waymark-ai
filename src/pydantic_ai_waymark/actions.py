@@ -16,7 +16,7 @@ from pydantic_ai.messages import ToolCallPart
 from pydantic_graph import End
 from waymark import action
 
-from .durability import PendingToolCallsError, tool_boundary
+from .durability import DurableSleep, PendingToolCallsError, tool_boundary
 from .registry import registered_agent
 from .serialization import (
     deferred_results,
@@ -248,6 +248,14 @@ async def run_agent_tool(
                 "tool_call_id": call.tool_call_id,
                 "tool_name": call.tool_name,
                 "message": error.message,
+            }
+        except DurableSleep as sleep:
+            return {
+                "kind": "sleep",
+                "tool_call_id": call.tool_call_id,
+                "tool_name": call.tool_name,
+                "seconds": sleep.seconds,
+                "value": sleep.result,
             }
         except (CallDeferred, ApprovalRequired):
             return {
