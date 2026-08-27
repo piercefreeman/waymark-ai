@@ -3,10 +3,10 @@
 Run a Pydantic AI agent as a compiled, durable
 [Waymark](https://github.com/piercefreeman/waymark) state machine.
 
-This is not an `agent.run()` wrapper. Each Pydantic AI graph transition is a
-Waymark action, and every user tool call is another Waymark action. A completed
-model request or tool call is therefore replayed from Waymark's persisted result
-instead of being executed again after a worker restart.
+Build agents that can run reliably for days, weeks, or years. The compilation
+layer turns Pydantic AI control flow into an efficient Waymark state machine, so
+an agent can persist its progress, sleep without occupying a worker, and wake at
+the right time to continue from its last completed step.
 
 ## Install
 
