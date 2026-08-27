@@ -209,8 +209,8 @@ class ParallelWorkflow(PydanticAIWorkflow[ParallelRequest]):
 
 @workflow
 class HttpWorkflow(PydanticAIWorkflow[HttpRequest]):
-    async def run(self, request: HttpRequest) -> str:
-        return (await self.run_agent(request)).output
+    async def run(self, request: HttpRequest) -> AgentResult:
+        return await self.run_agent(request)
 
 
 @workflow
@@ -250,7 +250,12 @@ OPENAI_RESPONSE = {
             "finish_reason": "stop",
         }
     ],
-    "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+    "usage": {
+        "prompt_tokens": 1,
+        "completion_tokens": 2,
+        "total_tokens": 3,
+        "completion_tokens_details": {"reasoning_tokens": 0},
+    },
 }
 
 
@@ -393,8 +398,26 @@ def test_retryable_openai_http_errors_rerun_the_graph_action(
         )
     )
 
-    assert result == "provider durable"
+    assert result.output == "provider durable"
     assert len(httpx_mock.get_requests()) == 2
+
+
+def test_openai_provider_specific_usage_survives_the_waymark_boundary(
+    httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_response(status_code=200, json=OPENAI_RESPONSE, url=OPENAI_URL)
+
+    result = asyncio.run(
+        HttpWorkflow().run(
+            HttpRequest(
+                prompt="answer this",
+                model_retry=BackoffConfig(initial_seconds=0, max_seconds=0),
+            )
+        )
+    )
+
+    assert result.output == "provider durable"
+    assert result.usage.model_extra == {"output_reasoning_tokens": 0}
 
 
 @pytest.mark.parametrize("status_code", [400, 401, 403, 404, 422])
@@ -435,7 +458,7 @@ def test_openai_transport_errors_are_retryable(
         )
     )
 
-    assert result == "provider durable"
+    assert result.output == "provider durable"
     assert len(httpx_mock.get_requests()) == 2
 
 

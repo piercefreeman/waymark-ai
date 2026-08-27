@@ -42,6 +42,11 @@ class BackoffConfig(WireModel):
 
 
 class UsagePayload(WireModel):
+    # Pydantic AI deliberately preserves provider-specific usage counters such as
+    # ``output_reasoning_tokens`` alongside its stable fields.
+    model_config = ConfigDict(extra="allow")
+    __pydantic_extra__: dict[str, JsonValue] = Field(init=False)
+
     input_tokens: int
     cache_write_tokens: int
     cache_read_tokens: int
