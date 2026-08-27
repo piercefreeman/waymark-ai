@@ -117,7 +117,7 @@ class SupportWorkflow(PydanticAIWorkflow):
             prompt,
             message_history=message_history,
         )
-        return result["output"]
+        return result.output
 ```
 
 The result also contains `message_history`, `new_messages`, `usage`, `run_id`,

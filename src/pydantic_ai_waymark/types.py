@@ -1,6 +1,7 @@
-from collections.abc import Mapping, Sequence
-from typing import Any, Literal, TypeAlias, TypedDict
+from collections.abc import Sequence
+from typing import Any, Literal, Self, TypeAlias, TypedDict
 
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_ai import _agent_graph
 from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.messages import UserContent
@@ -26,12 +27,13 @@ UserPrompt: TypeAlias = str | Sequence[UserContent] | None
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 WorkflowToolArgs: TypeAlias = dict[str, JsonValue]
 ToolMetadata: TypeAlias = dict[str, dict[str, JsonValue]]
-# Waymark actions receive decoded mappings before handlers refine them into the
-# discriminated payloads below.
-WirePayload: TypeAlias = Mapping[str, object]
 
 
-class UsagePayload(TypedDict):
+class WireModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+
+
+class UsagePayload(WireModel):
     input_tokens: int
     cache_write_tokens: int
     cache_read_tokens: int
@@ -44,7 +46,7 @@ class UsagePayload(TypedDict):
     tool_calls: int
 
 
-class AgentResult(TypedDict):
+class AgentResult(WireModel):
     output: AgentOutput
     message_history: str
     new_messages: str
@@ -53,7 +55,7 @@ class AgentResult(TypedDict):
     conversation_id: str
 
 
-class SerializedToolCall(TypedDict):
+class SerializedToolCall(WireModel):
     tool_name: str
     args: str | dict[str, JsonValue] | None
     tool_call_id: str
@@ -64,35 +66,34 @@ class SerializedToolCall(TypedDict):
     part_kind: Literal["tool-call"]
 
 
-class WaymarkToolPolicy(TypedDict):
-    attempts: int
-    backoff_seconds: float
-    timeout: float
+class WaymarkToolPolicy(WireModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    attempts: int = Field(default=3, ge=1)
+    backoff_seconds: float = Field(default=2.0, ge=0)
+    timeout: float = Field(default=120.0, gt=0)
 
 
-class ActionToolCall(TypedDict):
+class ToolCall(WireModel):
     call: SerializedToolCall
-    waymark: WaymarkToolPolicy
-    workflow_args: None
+    waymark: WaymarkToolPolicy | Literal[False]
+    workflow_args: WorkflowToolArgs | None
+
+    @model_validator(mode="after")
+    def validate_dispatch(self) -> Self:
+        if (self.waymark is False) != (self.workflow_args is not None):
+            raise ValueError("workflow arguments must be set only for workflow-native tools")
+        return self
 
 
-class WorkflowToolCall(TypedDict):
-    call: SerializedToolCall
-    waymark: Literal[False]
-    workflow_args: WorkflowToolArgs
-
-
-ToolCall: TypeAlias = ActionToolCall | WorkflowToolCall
-
-
-class ModelRequestNodePayload(TypedDict):
+class ModelRequestNodePayload(WireModel):
     kind: Literal["model_request"]
     request: str
     is_resuming_without_prompt: bool
     resume_suspended: str | None
 
 
-class CallToolsNodePayload(TypedDict):
+class CallToolsNodePayload(WireModel):
     kind: Literal["call_tools"]
     model_response: str
     tool_call_results: dict[str, DeferredToolResult | Literal["skip"]] | None
@@ -103,7 +104,7 @@ class CallToolsNodePayload(TypedDict):
 AgentNodePayload: TypeAlias = ModelRequestNodePayload | CallToolsNodePayload
 
 
-class DepsState(TypedDict):
+class DepsState(WireModel):
     new_message_index: int
     resumed_request: str | None
     resumed_request_index: int | None
@@ -117,14 +118,14 @@ class DepsState(TypedDict):
     succeeded_tools: list[str]
 
 
-class RunningTransition(TypedDict):
-    result: None
+class RunningTransition(WireModel):
+    result: None = None
     state: str
     node: AgentNodePayload
     deps_state: DepsState
-    tool_calls: list[ToolCall]
-    approvals: list[SerializedToolCall]
-    tool_metadata: ToolMetadata
+    tool_calls: list[ToolCall] = Field(default_factory=list)
+    approvals: list[SerializedToolCall] = Field(default_factory=list)
+    tool_metadata: ToolMetadata = Field(default_factory=dict)
 
 
 class NodeTransition(RunningTransition):
@@ -135,15 +136,15 @@ class ToolsTransition(RunningTransition):
     kind: Literal["tools"]
 
 
-class DoneTransition(TypedDict):
+class DoneTransition(WireModel):
     kind: Literal["done"]
     result: AgentResult
-    state: None
-    node: None
-    deps_state: None
-    tool_calls: list[ToolCall]
-    approvals: list[SerializedToolCall]
-    tool_metadata: ToolMetadata
+    state: None = None
+    node: None = None
+    deps_state: None = None
+    tool_calls: list[ToolCall] = Field(default_factory=list)
+    approvals: list[SerializedToolCall] = Field(default_factory=list)
+    tool_metadata: ToolMetadata = Field(default_factory=dict)
 
 
 PendingTransition: TypeAlias = NodeTransition | ToolsTransition

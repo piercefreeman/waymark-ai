@@ -62,14 +62,14 @@ def lookup(query: str) -> str:
 class AgentWorkflow(PydanticAIWorkflow):
     async def run(self, prompt: str) -> Answer:
         result = await self.run_agent("test_agent", prompt)
-        return result["output"]
+        return result.output
 
 
 @workflow
 class ToolWorkflow(PydanticAIWorkflow):
     async def run(self, prompt: str) -> str:
         result = await self.run_agent("tool_agent", prompt)
-        return result["output"]
+        return result.output
 
 
 @workflow
@@ -93,7 +93,7 @@ class WorkflowToolWorkflow(PydanticAIWorkflow):
 
     async def run(self, prompt: str) -> str:
         result = await self.run_agent("workflow_tool_agent", prompt)
-        return result["output"]
+        return result.output
 
 
 async def drive(agent_name: str) -> tuple[AgentResult, int]:
@@ -106,13 +106,13 @@ async def drive(agent_name: str) -> tuple[AgentResult, int]:
             transition,
             tool_results,
         )
+        assert isinstance(transition, BaseModel)
         tool_results = []
-        if transition["kind"] == "done":
-            assert transition["result"] is not None
-            return transition["result"], step_count
+        if transition.kind == "done":
+            return transition.result, step_count
         tool_results = [
             await run_agent_tool(agent_name, transition, call)
-            for call in transition["tool_calls"]
+            for call in transition.tool_calls
         ]
     raise AssertionError("agent did not finish")
 
@@ -120,10 +120,10 @@ async def drive(agent_name: str) -> tuple[AgentResult, int]:
 def test_model_run_is_checkpointed_by_graph_node() -> None:
     result, step_count = asyncio.run(drive("test_agent"))
 
-    assert result["output"] == Answer(value="durable")
-    assert ModelMessagesTypeAdapter.validate_json(result["message_history"])
-    assert ModelMessagesTypeAdapter.validate_json(result["new_messages"])
-    assert result["usage"]["requests"] == 1
+    assert result.output == Answer(value="durable")
+    assert ModelMessagesTypeAdapter.validate_json(result.message_history)
+    assert ModelMessagesTypeAdapter.validate_json(result.new_messages)
+    assert result.usage.requests == 1
     assert step_count == 3
 
 
@@ -131,8 +131,8 @@ def test_tool_round_trip_resumes_across_graph_node_actions() -> None:
     tool_calls.clear()
     result, step_count = asyncio.run(drive("tool_agent"))
 
-    assert result["output"] == '{"lookup":"found"}'
-    assert result["usage"]["requests"] == 2
+    assert result.output == '{"lookup":"found"}'
+    assert result.usage.requests == 2
     assert tool_calls == ["a"]
     assert step_count == 6
 

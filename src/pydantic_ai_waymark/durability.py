@@ -1,6 +1,6 @@
-from typing import Literal, Never, cast
+from typing import Literal, Never
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import TypeAdapter, ValidationError
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import (
     AbstractCapability,
@@ -14,15 +14,6 @@ from pydantic_ai.tools import DeferredToolRequests, ToolDefinition
 
 from .types import AgentDeps, WaymarkToolPolicy, WorkflowToolArgs
 
-
-class _WaymarkToolPolicy(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    attempts: int = Field(default=3, ge=1)
-    backoff_seconds: float = Field(default=2.0, ge=0)
-    timeout: float = Field(default=120.0, gt=0)
-
-
 workflow_args_adapter = TypeAdapter(WorkflowToolArgs)
 
 
@@ -32,7 +23,7 @@ def _tool_policy(tool_def: ToolDefinition) -> WaymarkToolPolicy | Literal[False]
     if policy is False:
         return False
     try:
-        return cast(WaymarkToolPolicy, _WaymarkToolPolicy.model_validate(policy).model_dump())
+        return WaymarkToolPolicy.model_validate(policy)
     except ValidationError as error:
         message = f"Tool {tool_def.name!r} has invalid 'waymark' metadata: {error}"
         raise UserError(message) from error
