@@ -7,7 +7,9 @@ from pydantic_ai.models.test import TestModel
 from waymark import workflow
 
 from pydantic_ai_waymark import (
+    AgentResult,
     PydanticAIWorkflow,
+    WorkflowToolArgs,
     run_agent_node,
     run_agent_tool,
     waymark_agent,
@@ -83,7 +85,7 @@ class WorkflowToolWorkflow(PydanticAIWorkflow):
         self,
         agent_name: str,
         tool_name: str,
-        args: dict,
+        args: WorkflowToolArgs,
     ) -> str:
         if tool_name == "pause":
             return await self.pause()
@@ -94,7 +96,7 @@ class WorkflowToolWorkflow(PydanticAIWorkflow):
         return result["output"]
 
 
-async def drive(agent_name: str) -> tuple[dict, int]:
+async def drive(agent_name: str) -> tuple[AgentResult, int]:
     transition = None
     tool_results = []
     for step_count in range(1, 10):

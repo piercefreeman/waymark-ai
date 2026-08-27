@@ -1,40 +1,55 @@
 import dataclasses
 from dataclasses import replace
-from typing import Any, cast
+from typing import Literal, cast
 
 from pydantic import TypeAdapter
 from pydantic_ai import ModelMessagesTypeAdapter, RunUsage, _agent_graph
 from pydantic_ai.exceptions import ModelRetry, ToolFailed
-from pydantic_ai.messages import ModelRequest, RetryPromptPart, ToolCallPart
-from pydantic_ai.tools import DeferredToolResults
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    RetryPromptPart,
+    ToolCallPart,
+)
+from pydantic_ai.tools import DeferredToolResult, DeferredToolResults
 
-from .types import AgentTransition, ToolActionResult
+from .types import (
+    AgentNodePayload,
+    DepsState,
+    PendingTransition,
+    PersistedPydanticNode,
+    RegisteredAgentRun,
+    SerializedToolCall,
+    ToolActionResult,
+    ToolMetadata,
+)
 
 state_adapter = TypeAdapter(_agent_graph.GraphAgentState)
 usage_adapter = TypeAdapter(RunUsage)
 tool_call_adapter = TypeAdapter(ToolCallPart)
 
 
-def dump_message(message: Any) -> str:
+def dump_message(message: ModelMessage) -> str:
     return ModelMessagesTypeAdapter.dump_json([message]).decode()
 
 
-def load_message(value: str) -> Any:
+def load_message(value: str) -> ModelMessage:
     messages = ModelMessagesTypeAdapter.validate_json(value)
     if len(messages) != 1:
         raise ValueError("expected exactly one serialized model message")
     return messages[0]
 
 
-def dump_tool_call(call: ToolCallPart) -> dict[str, Any]:
-    return tool_call_adapter.dump_python(call, mode="json")
+def dump_tool_call(call: ToolCallPart) -> SerializedToolCall:
+    return cast(SerializedToolCall, tool_call_adapter.dump_python(call, mode="json"))
 
 
-def load_tool_call(value: dict[str, Any]) -> ToolCallPart:
+def load_tool_call(value: SerializedToolCall) -> ToolCallPart:
     return tool_call_adapter.validate_python(value)
 
 
-def dump_node(node: Any) -> dict[str, Any]:
+def dump_node(node: PersistedPydanticNode) -> AgentNodePayload:
     if isinstance(node, _agent_graph.ModelRequestNode):
         return {
             "kind": "model_request",
@@ -51,24 +66,26 @@ def dump_node(node: Any) -> dict[str, Any]:
             "kind": "call_tools",
             "model_response": dump_message(node.model_response),
             "tool_call_results": node.tool_call_results,
-            "tool_call_metadata": node.tool_call_metadata,
+            "tool_call_metadata": cast(ToolMetadata | None, node.tool_call_metadata),
             "user_prompt": node.user_prompt,
         }
     raise TypeError(f"unsupported Pydantic AI graph node: {type(node).__name__}")
 
 
-def load_node(value: dict[str, Any]) -> Any:
+def load_node(value: AgentNodePayload) -> PersistedPydanticNode:
     match value["kind"]:
         case "model_request":
             suspended = value["resume_suspended"]
             return _agent_graph.ModelRequestNode(
-                request=load_message(value["request"]),
+                request=cast(ModelRequest, load_message(value["request"])),
                 is_resuming_without_prompt=value["is_resuming_without_prompt"],
-                _resume_suspended=load_message(suspended) if suspended is not None else None,
+                _resume_suspended=(
+                    cast(ModelResponse, load_message(suspended)) if suspended is not None else None
+                ),
             )
         case "call_tools":
             return _agent_graph.CallToolsNode(
-                model_response=load_message(value["model_response"]),
+                model_response=cast(ModelResponse, load_message(value["model_response"])),
                 tool_call_results=value["tool_call_results"],
                 tool_call_metadata=value["tool_call_metadata"],
                 user_prompt=value["user_prompt"],
@@ -77,7 +94,7 @@ def load_node(value: dict[str, Any]) -> Any:
             raise ValueError(f"unknown Pydantic AI graph node kind: {kind!r}")
 
 
-def dump_deps_state(agent_run: Any) -> dict[str, Any]:
+def dump_deps_state(agent_run: RegisteredAgentRun) -> DepsState:
     deps = agent_run.ctx.deps
     tool_manager = deps.tool_manager
     tool_context = tool_manager.ctx
@@ -98,7 +115,7 @@ def dump_deps_state(agent_run: Any) -> dict[str, Any]:
     }
 
 
-async def restore_deps_state(agent_run: Any, value: dict[str, Any]) -> None:
+async def restore_deps_state(agent_run: RegisteredAgentRun, value: DepsState) -> None:
     deps = agent_run.ctx.deps
     deps.new_message_index = value["new_message_index"]
     serialized_request = value["resumed_request"]
@@ -128,25 +145,29 @@ async def restore_deps_state(agent_run: Any, value: dict[str, Any]) -> None:
         deps.tool_manager = tool_manager
 
 
-def restore_graph_state(agent_run: Any, transition: AgentTransition) -> Any:
+def restore_graph_state(
+    agent_run: RegisteredAgentRun,
+    transition: PendingTransition,
+) -> _agent_graph.GraphAgentState:
     restored_state = state_adapter.validate_json(transition["state"])
     for state_field in dataclasses.fields(restored_state):
         setattr(agent_run.ctx.state, state_field.name, getattr(restored_state, state_field.name))
     return restored_state
 
 
-def deferred_results(results: list[ToolActionResult]) -> dict[str, Any]:
-    calls: dict[str, Any] = {}
+def deferred_results(
+    results: list[ToolActionResult],
+) -> dict[str, DeferredToolResult | Literal["skip"]]:
+    calls: dict[str, object] = {}
     for result in results:
-        kind = result["kind"]
         tool_call_id = result["tool_call_id"]
-        if kind == "return":
+        if result["kind"] == "return":
             calls[tool_call_id] = result["value"]
-        elif kind == "model_retry":
+        elif result["kind"] == "model_retry":
             calls[tool_call_id] = ModelRetry(result["message"])
-        elif kind == "tool_failed":
+        elif result["kind"] == "tool_failed":
             calls[tool_call_id] = ToolFailed(result["message"])
-        elif kind == "retry_prompt":
+        elif result["kind"] == "retry_prompt":
             calls[tool_call_id] = RetryPromptPart(
                 content=result["content"],
                 tool_name=result["tool_name"],
@@ -156,4 +177,7 @@ def deferred_results(results: list[ToolActionResult]) -> dict[str, Any]:
             raise RuntimeError(
                 f"tool {result['tool_name']!r} remained deferred inside its Waymark action"
             )
-    return DeferredToolResults(calls=calls).to_tool_call_results()
+    return cast(
+        dict[str, DeferredToolResult | Literal["skip"]],
+        DeferredToolResults(calls=calls).to_tool_call_results(),
+    )

@@ -1,6 +1,8 @@
 import asyncio
-from typing import Any, cast
+from collections.abc import Mapping
+from typing import Never, cast
 
+from pydantic import TypeAdapter
 from pydantic_ai import ModelMessagesTypeAdapter, _agent_graph
 from pydantic_ai.exceptions import (
     ApprovalRequired,
@@ -10,6 +12,7 @@ from pydantic_ai.exceptions import (
     ToolFailedError,
     ToolRetryError,
 )
+from pydantic_ai.messages import ToolCallPart
 from pydantic_graph import End
 from waymark import action
 
@@ -27,26 +30,69 @@ from .serialization import (
     state_adapter,
     usage_adapter,
 )
-from .types import AgentResult, AgentTransition, ToolActionResult
+from .types import (
+    AgentDeps,
+    AgentOutput,
+    AgentResult,
+    AgentTransition,
+    JsonValue,
+    PendingTransition,
+    PersistedPydanticNode,
+    PydanticRunNode,
+    ToolActionResult,
+    ToolCall,
+    ToolMetadata,
+    UsagePayload,
+    WaymarkToolPolicy,
+    WirePayload,
+    WorkflowToolArgs,
+)
+
+tool_metadata_adapter = TypeAdapter(dict[str, JsonValue])
+
+
+def _pending_tool_call(call: ToolCallPart, metadata: Mapping[str, object]) -> ToolCall:
+    policy = metadata.get("waymark")
+    if policy is False:
+        workflow_args = metadata.get("waymark_args")
+        if not isinstance(workflow_args, dict):
+            raise RuntimeError(f"workflow tool {call.tool_name!r} has no validated arguments")
+        return {
+            "call": dump_tool_call(call),
+            "waymark": False,
+            "workflow_args": cast(WorkflowToolArgs, workflow_args),
+        }
+    if not isinstance(policy, dict):
+        raise RuntimeError(f"tool {call.tool_name!r} has no Waymark action policy")
+    return {
+        "call": dump_tool_call(call),
+        "waymark": cast(WaymarkToolPolicy, policy),
+        "workflow_args": None,
+    }
 
 
 @action(name="pydantic_ai_agent_node")
 async def run_agent_node(
     agent_name: str,
     prompt: str | None,
-    transition: AgentTransition | None = None,
+    transition: WirePayload | None = None,
     tool_results: list[ToolActionResult] | None = None,
     *,
     message_history: str | None = None,
-    deps: Any = None,
+    deps: AgentDeps = None,
     model: str | None = None,
     conversation_id: str | None = None,
     run_id: str | None = None,
 ) -> AgentTransition:
     """Run exactly one Pydantic AI graph node as a Waymark action."""
+    typed_transition = cast(AgentTransition | None, transition)
+    if typed_transition is not None and typed_transition["kind"] == "done":
+        raise RuntimeError("a completed agent transition cannot be resumed")
     agent = registered_agent(agent_name)
     restored_state = (
-        state_adapter.validate_json(transition["state"]) if transition is not None else None
+        state_adapter.validate_json(typed_transition["state"])
+        if typed_transition is not None
+        else None
     )
     history = (
         restored_state.message_history
@@ -61,30 +107,36 @@ async def run_agent_node(
         message_history=history,
         deps=deps,
         model=model,
-        conversation_id=conversation_id if transition is None else None,
-        run_id=run_id if transition is None else None,
+        conversation_id=conversation_id if typed_transition is None else None,
+        run_id=run_id if typed_transition is None else None,
         infer_name=False,
         capabilities=[tool_boundary],
     ) as agent_run:
-        node: _agent_graph.AgentNode[Any, Any]
+        node: PydanticRunNode
         if restored_state is None:
-            node = cast(_agent_graph.AgentNode[Any, Any], agent_run.next_node)
+            node = cast(PydanticRunNode, agent_run.next_node)
         else:
-            assert transition is not None
-            restore_graph_state(agent_run, transition)
-            await restore_deps_state(agent_run, transition["deps_state"])
-            node = load_node(transition["node"])
+            assert typed_transition is not None
+            restore_graph_state(agent_run, typed_transition)
+            await restore_deps_state(agent_run, typed_transition["deps_state"])
+            node = load_node(typed_transition["node"])
 
         if tool_results:
             if not isinstance(node, _agent_graph.CallToolsNode):
                 raise RuntimeError("tool results can only resume a call-tools node")
-            node.tool_call_results = deferred_results(tool_results)
-            node.tool_call_metadata = transition["tool_metadata"] if transition is not None else {}
+            call_tools_node = cast(
+                _agent_graph.CallToolsNode[AgentDeps, AgentOutput],
+                node,
+            )
+            call_tools_node.tool_call_results = deferred_results(tool_results)
+            call_tools_node.tool_call_metadata = (
+                typed_transition["tool_metadata"] if typed_transition is not None else {}
+            )
 
         try:
             next_node = await agent_run.next(node)
         except PendingToolCallsError as pending:
-            tool_metadata = {}
+            tool_metadata: ToolMetadata = {}
             for tool_call_id, metadata in pending.requests.metadata.items():
                 remaining = {
                     key: value
@@ -92,21 +144,17 @@ async def run_agent_node(
                     if key not in {"waymark", "waymark_args"}
                 }
                 if remaining:
-                    tool_metadata[tool_call_id] = remaining
+                    tool_metadata[tool_call_id] = tool_metadata_adapter.validate_python(
+                        remaining
+                    )
             return {
                 "kind": "tools",
                 "result": None,
                 "state": state_adapter.dump_json(agent_run.ctx.state).decode(),
-                "node": dump_node(node),
+                "node": dump_node(cast(PersistedPydanticNode, node)),
                 "deps_state": dump_deps_state(agent_run),
                 "tool_calls": [
-                    {
-                        "call": dump_tool_call(call),
-                        "waymark": pending.requests.metadata[call.tool_call_id]["waymark"],
-                        "workflow_args": pending.requests.metadata[call.tool_call_id].get(
-                            "waymark_args"
-                        ),
-                    }
+                    _pending_tool_call(call, pending.requests.metadata[call.tool_call_id])
                     for call in pending.requests.calls
                 ],
                 "approvals": [dump_tool_call(call) for call in pending.requests.approvals],
@@ -120,7 +168,7 @@ async def run_agent_node(
                 "output": result.output,
                 "message_history": result.all_messages_json().decode(),
                 "new_messages": result.new_messages_json().decode(),
-                "usage": usage_adapter.dump_python(result.usage, mode="json"),
+                "usage": cast(UsagePayload, usage_adapter.dump_python(result.usage, mode="json")),
                 "run_id": result.run_id,
                 "conversation_id": result.conversation_id,
             }
@@ -135,6 +183,8 @@ async def run_agent_node(
                 "tool_metadata": {},
             }
 
+        if not isinstance(next_node, (_agent_graph.ModelRequestNode, _agent_graph.CallToolsNode)):
+            raise RuntimeError(f"unsupported next agent node: {type(next_node).__name__}")
         return {
             "kind": "node",
             "result": None,
@@ -150,18 +200,23 @@ async def run_agent_node(
 @action(name="pydantic_ai_agent_tool")
 async def run_agent_tool(
     agent_name: str,
-    transition: AgentTransition,
-    tool_call: dict[str, Any],
+    transition: WirePayload,
+    tool_call: WirePayload,
     *,
-    deps: Any = None,
+    deps: AgentDeps = None,
     model: str | None = None,
 ) -> ToolActionResult:
     """Execute one validated Pydantic AI tool call as a Waymark action."""
+    typed_transition = cast(PendingTransition, transition)
+    typed_tool_call = cast(ToolCall, tool_call)
+    policy = typed_tool_call["waymark"]
+    if policy is False:
+        raise RuntimeError("workflow-native tools cannot execute as actions")
     agent = registered_agent(agent_name)
-    state = state_adapter.validate_json(transition["state"])
-    node = load_node(transition["node"])
+    state = state_adapter.validate_json(typed_transition["state"])
+    node = load_node(typed_transition["node"])
     assert isinstance(node, _agent_graph.CallToolsNode)
-    call = load_tool_call(tool_call["call"])
+    call = load_tool_call(typed_tool_call["call"])
 
     async with agent.iter(
         node.user_prompt,
@@ -170,11 +225,11 @@ async def run_agent_tool(
         model=model,
         infer_name=False,
     ) as agent_run:
-        restore_graph_state(agent_run, transition)
-        await restore_deps_state(agent_run, transition["deps_state"])
-        metadata = transition["tool_metadata"].get(call.tool_call_id)
+        restore_graph_state(agent_run, typed_transition)
+        await restore_deps_state(agent_run, typed_transition["deps_state"])
+        metadata = typed_transition["tool_metadata"].get(call.tool_call_id)
         try:
-            async with asyncio.timeout(tool_call["waymark"]["timeout"]):
+            async with asyncio.timeout(policy["timeout"]):
                 value = await agent_run.ctx.deps.tool_manager.handle_call(call, metadata=metadata)
         except ToolRetryError as error:
             return {
@@ -219,17 +274,17 @@ async def run_agent_tool(
 
 
 @action(name="pydantic_ai_agent_tool_attempts_exhausted")
-async def raise_tool_attempts_exhausted(tool_name: str, attempts: int) -> ToolActionResult:
+async def raise_tool_attempts_exhausted(tool_name: str, attempts: int) -> Never:
     raise RuntimeError(f"tool {tool_name!r} failed after {attempts} Waymark attempts")
 
 
 @action(name="pydantic_ai_workflow_tool_not_configured")
-async def raise_workflow_tool_not_configured(agent_name: str, tool_name: str) -> Any:
+async def raise_workflow_tool_not_configured(agent_name: str, tool_name: str) -> Never:
     raise RuntimeError(
         f"workflow tool {tool_name!r} for agent {agent_name!r} has no compiled handler"
     )
 
 
 @action(name="pydantic_ai_agent_approval_required")
-async def raise_approval_required(agent_name: str) -> AgentResult:
+async def raise_approval_required(agent_name: str) -> Never:
     raise RuntimeError(f"agent {agent_name!r} requested human approval")

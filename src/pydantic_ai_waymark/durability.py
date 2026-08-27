@@ -1,12 +1,18 @@
-from typing import Any, Literal
+from typing import Literal, Never, cast
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 from pydantic_ai import RunContext
-from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.capabilities import (
+    AbstractCapability,
+    ValidatedToolArgs,
+    WrapToolExecuteHandler,
+)
 from pydantic_ai.capabilities.abstract import CapabilityOrdering
 from pydantic_ai.exceptions import CallDeferred, UserError
 from pydantic_ai.messages import ToolCallPart
-from pydantic_ai.tools import DeferredToolRequests, DeferredToolResults, ToolDefinition
+from pydantic_ai.tools import DeferredToolRequests, ToolDefinition
+
+from .types import AgentDeps, WaymarkToolPolicy, WorkflowToolArgs
 
 
 class _WaymarkToolPolicy(BaseModel):
@@ -17,16 +23,16 @@ class _WaymarkToolPolicy(BaseModel):
     timeout: float = Field(default=120.0, gt=0)
 
 
-workflow_args_adapter = TypeAdapter(Any)
+workflow_args_adapter = TypeAdapter(WorkflowToolArgs)
 
 
-def _tool_policy(tool_def: ToolDefinition) -> dict[str, Any] | Literal[False]:
+def _tool_policy(tool_def: ToolDefinition) -> WaymarkToolPolicy | Literal[False]:
     metadata = tool_def.metadata or {}
     policy = metadata.get("waymark", {})
     if policy is False:
         return False
     try:
-        return _WaymarkToolPolicy.model_validate(policy).model_dump()
+        return cast(WaymarkToolPolicy, _WaymarkToolPolicy.model_validate(policy).model_dump())
     except ValidationError as error:
         message = f"Tool {tool_def.name!r} has invalid 'waymark' metadata: {error}"
         raise UserError(message) from error
@@ -37,7 +43,7 @@ class PendingToolCallsError(Exception):
         self.requests = requests
 
 
-class WaymarkToolBoundary(AbstractCapability[Any]):
+class WaymarkToolBoundary(AbstractCapability[AgentDeps]):
     """Stop a graph node after validation, before user tool code runs."""
 
     @classmethod
@@ -49,26 +55,26 @@ class WaymarkToolBoundary(AbstractCapability[Any]):
 
     async def wrap_tool_execute(
         self,
-        ctx: RunContext[Any],
+        ctx: RunContext[AgentDeps],
         *,
         call: ToolCallPart,
         tool_def: ToolDefinition,
-        args: Any,
-        handler: Any,
-    ) -> Any:
+        args: ValidatedToolArgs,
+        handler: WrapToolExecuteHandler,
+    ) -> Never:
         del ctx, call, handler
         policy = _tool_policy(tool_def)
-        metadata = {"waymark": policy}
+        metadata: dict[str, object] = {"waymark": policy}
         if policy is False:
             metadata["waymark_args"] = workflow_args_adapter.dump_python(args, mode="json")
         raise CallDeferred(metadata=metadata)
 
     async def handle_deferred_tool_calls(
         self,
-        ctx: RunContext[Any],
+        ctx: RunContext[AgentDeps],
         *,
         requests: DeferredToolRequests,
-    ) -> DeferredToolResults | None:
+    ) -> Never:
         del ctx
         raise PendingToolCallsError(requests)
 

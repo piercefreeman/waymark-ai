@@ -1,5 +1,5 @@
 import asyncio
-from typing import Any
+from typing import Never
 
 from waymark import Workflow
 
@@ -10,7 +10,14 @@ from .actions import (
     run_agent_node,
     run_agent_tool,
 )
-from .types import AgentResult
+from .types import (
+    AgentDeps,
+    AgentResult,
+    AgentTransition,
+    ToolActionResult,
+    ToolValue,
+    WorkflowToolArgs,
+)
 
 
 class PydanticAIWorkflow(Workflow):
@@ -21,21 +28,22 @@ class PydanticAIWorkflow(Workflow):
         agent_name: str,
         prompt: str | None,
         message_history: str | None = None,
-        deps: Any = None,
+        deps: AgentDeps = None,
         model: str | None = None,
         conversation_id: str | None = None,
         run_id: str | None = None,
     ) -> AgentResult:
-        transition = None
-        tool_results = []
+        previous_transition: AgentTransition | None = None
+        tool_results: list[ToolActionResult] = []
         while True:
+            current_transition: AgentTransition | None = None
             while True:
                 try:
-                    next_transition = await self.run_action(
+                    current_transition = await self.run_action(
                         run_agent_node(
                             agent_name,
                             prompt,
-                            transition,
+                            previous_transition,
                             tool_results,
                             message_history=message_history,
                             deps=deps,
@@ -44,16 +52,18 @@ class PydanticAIWorkflow(Workflow):
                             run_id=run_id,
                         )
                     )
-                    transition = next_transition
+                    previous_transition = current_transition
                     break
                 except Exception:
                     await asyncio.sleep(2)
             tool_results = []
-            if transition["kind"] == "done":
-                return transition["result"]
-            if transition["approvals"]:
+            if current_transition is None:
+                continue
+            if current_transition["kind"] == "done":
+                return current_transition["result"]
+            if current_transition["approvals"]:
                 return await raise_approval_required(agent_name)
-            for tool_call in transition["tool_calls"]:
+            for tool_call in current_transition["tool_calls"]:
                 # This branch is selected only by metadata={"waymark": False} on the
                 # Pydantic AI tool. Pydantic has already validated the arguments and
                 # stored them in the durable transition. The workflow implementation
@@ -61,10 +71,15 @@ class PydanticAIWorkflow(Workflow):
                 # Waymark-compileable code. asyncio.sleep() is a durable workflow timer;
                 # external I/O and other side effects do not belong in this branch.
                 if tool_call["waymark"] is False:
+                    workflow_args = tool_call["workflow_args"]
+                    if workflow_args is None:
+                        return await self._unsupported_workflow_tool(
+                            agent_name, tool_call["call"]["tool_name"]
+                        )
                     workflow_value = await self.run_workflow_tool(
                         agent_name,
                         tool_call["call"]["tool_name"],
-                        tool_call["workflow_args"],
+                        workflow_args,
                     )
                     tool_results.append(
                         {
@@ -87,7 +102,7 @@ class PydanticAIWorkflow(Workflow):
                             action_result = await self.run_action(
                                 run_agent_tool(
                                     agent_name,
-                                    transition,
+                                    current_transition,
                                     tool_call,
                                     deps=deps,
                                     model=model,
@@ -107,9 +122,9 @@ class PydanticAIWorkflow(Workflow):
         self,
         agent_name: str,
         tool_name: str,
-        args: dict[str, Any],
-    ) -> Any:
+        args: WorkflowToolArgs,
+    ) -> ToolValue:
         return await self._unsupported_workflow_tool(agent_name, tool_name)
 
-    async def _unsupported_workflow_tool(self, agent_name: str, tool_name: str) -> Any:
+    async def _unsupported_workflow_tool(self, agent_name: str, tool_name: str) -> Never:
         return await raise_workflow_tool_not_configured(agent_name, tool_name)

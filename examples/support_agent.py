@@ -1,11 +1,10 @@
 import asyncio
-from typing import Any
 
 from pydantic import BaseModel
 from pydantic_ai import Agent
 from waymark import workflow
 
-from pydantic_ai_waymark import PydanticAIWorkflow, waymark_agent
+from pydantic_ai_waymark import PydanticAIWorkflow, WorkflowToolArgs, waymark_agent
 
 
 class SupportReply(BaseModel):
@@ -65,8 +64,8 @@ class SupportWorkflow(PydanticAIWorkflow):
         self,
         agent_name: str,
         tool_name: str,
-        args: dict[str, Any],
-    ) -> Any:
+        args: WorkflowToolArgs,
+    ) -> str:
         if tool_name == "wait_for_follow_up":
             return await self.wait_for_follow_up(args["seconds"])
         return await self._unsupported_workflow_tool(agent_name, tool_name)

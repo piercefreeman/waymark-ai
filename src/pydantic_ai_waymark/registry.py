@@ -1,11 +1,11 @@
 import inspect
-from typing import Any, TypeVar
+from typing import TypeVar
 
-from pydantic_ai.agent import AbstractAgent
+from .types import RegisteredAgent
 
-AgentT = TypeVar("AgentT", bound=AbstractAgent[Any, Any])
+AgentT = TypeVar("AgentT", bound=RegisteredAgent)
 
-_agents: dict[str, AbstractAgent[Any, Any]] = {}
+_agents: dict[str, RegisteredAgent] = {}
 
 
 def waymark_agent(
@@ -30,7 +30,7 @@ def waymark_agent(
     return agent
 
 
-def registered_agent(reference: str) -> AbstractAgent[Any, Any]:
+def registered_agent(reference: str) -> RegisteredAgent:
     if agent := _agents.get(reference):
         return agent
     matches = [agent for key, agent in _agents.items() if key.endswith(f":{reference}")]
