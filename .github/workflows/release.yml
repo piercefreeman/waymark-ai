@@ -30,8 +30,11 @@ jobs:
       - name: Set package version from tag
         run: uv version "${GITHUB_REF_NAME#v}" --frozen
 
-      - name: Build package
-        run: uv build
+      - name: Build packages
+        run: |
+          uv build
+          sed -i 's/name = "pydantic-ai-waymark"/name = "waymark-ai"/' pyproject.toml
+          uv build
 
       - uses: actions/upload-artifact@v7.0.1
         with:
