@@ -23,7 +23,9 @@ from pydantic_ai_waymark import (
     AIRequestBase,
     BackoffConfig,
     DurableSleep,
+    Payload,
     PydanticAIWorkflow,
+    SerializedPayload,
     run_agent_node,
     run_agent_tool,
     waymark_agent,
@@ -44,6 +46,7 @@ def reset_mutable_test_state() -> None:
     hook_events.clear()
     codec_store.blobs.clear()
     codec_dependency_events.clear()
+    codec_payload_kinds.clear()
 
 
 class Answer(BaseModel):
@@ -61,6 +64,7 @@ class CodecStore:
 
 codec_store = CodecStore()
 codec_dependency_events: list[str] = []
+codec_payload_kinds: list[str] = []
 
 
 async def provide_codec_store():
@@ -99,17 +103,19 @@ def _deserialize_binary(value: Any, store: CodecStore) -> Any:
 
 
 async def serialize_binary_payload(
-    payload: Any,
+    payload: Payload,
     store: Annotated[CodecStore, Depends(provide_codec_store)],
-) -> Any:
-    return _serialize_binary(payload, store)
+) -> SerializedPayload:
+    codec_payload_kinds.append(f"serialize:{payload.kind}")
+    return payload.serialized(_serialize_binary(payload.to_python(), store))
 
 
 async def deserialize_binary_payload(
-    payload: Any,
+    payload: SerializedPayload,
     store: Annotated[CodecStore, Depends(provide_codec_store)],
-) -> Any:
-    return _deserialize_binary(payload, store)
+) -> Payload:
+    codec_payload_kinds.append(f"deserialize:{payload.kind}")
+    return payload.deserialized(_deserialize_binary(payload.value, store))
 
 
 test_agent = waymark_agent(
@@ -503,6 +509,19 @@ def test_payload_codecs_keep_binary_data_out_of_durable_transitions() -> None:
     assert list(codec_store.blobs.values()) == [b"rendered slide"]
     assert codec_dependency_events.count("open") == codec_dependency_events.count("close")
     assert codec_dependency_events
+    assert set(codec_payload_kinds) == {
+        "serialize:graph_state",
+        "deserialize:graph_state",
+        "serialize:messages",
+        "deserialize:messages",
+        "serialize:agent_output",
+        "serialize:tool_output",
+        "deserialize:tool_action_results",
+        "serialize:deferred_tool_results",
+        "deserialize:deferred_tool_results",
+        "serialize:user_prompt",
+        "deserialize:user_prompt",
+    }
 
 
 def test_waymark_executes_compiled_agent_state_machine() -> None:

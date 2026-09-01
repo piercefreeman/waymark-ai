@@ -1,5 +1,6 @@
 import dataclasses
 import inspect
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Any, Literal, cast
 
@@ -21,21 +22,29 @@ from .registry import registered_codecs
 from .types import (
     AgentNodePayload,
     CallToolsNodePayload,
+    DeferredToolResultsPayload,
     DepsState,
+    GraphStatePayload,
+    MessagesPayload,
     ModelRequestNodePayload,
+    Payload,
+    PayloadKind,
     PersistedPydanticNode,
     RegisteredAgent,
     RegisteredAgentRun,
+    SerializedPayload,
     SerializedToolCall,
     ToolActionResult,
     ToolMetadata,
     UserPrompt,
+    UserPromptPayload,
 )
 
 state_adapter = TypeAdapter(_agent_graph.GraphAgentState)
 usage_adapter = TypeAdapter(RunUsage)
 tool_call_adapter = TypeAdapter(ToolCallPart)
 wire_adapter = TypeAdapter(Any)
+payload_adapter = TypeAdapter(Payload)
 user_prompt_adapter = TypeAdapter(UserPrompt)
 tool_results_adapter = TypeAdapter(dict[str, DeferredToolResult | Literal["skip"]])
 
@@ -46,7 +55,7 @@ def restore_agent_deps(agent: RegisteredAgent, deps: object) -> object:
     return TypeAdapter(agent.deps_type).validate_python(deps)
 
 
-async def _transform_payload(agent_name: str, value: Any, *, serialize: bool) -> Any:
+async def _transform_payload(agent_name: str, value: object, *, serialize: bool) -> object:
     codecs = registered_codecs(agent_name)
     if codecs is None:
         return value
@@ -55,44 +64,67 @@ async def _transform_payload(agent_name: str, value: Any, *, serialize: bool) ->
         (serializer, serializer_parameter) if serialize else (deserializer, deserializer_parameter)
     )
     async with provide_dependencies(codec, {parameter: value}) as kwargs:
-        result = codec(**kwargs)
+        kwargs.pop(parameter)
+        result = cast(Callable[..., object], codec)(value, **kwargs)
         return await result if inspect.isawaitable(result) else result
 
 
-async def serialize_payload(agent_name: str, value: Any) -> Any:
+async def serialize_payload(agent_name: str, payload: Payload) -> Any:
     """Transform one value before it crosses a durable action boundary."""
     if registered_codecs(agent_name) is None:
-        return value
-    wire_value = wire_adapter.dump_python(value, mode="python")
-    return await _transform_payload(agent_name, wire_value, serialize=True)
+        return payload.value
+    result = SerializedPayload.model_validate(
+        await _transform_payload(agent_name, payload, serialize=True)
+    )
+    if result.kind != payload.kind:
+        raise ValueError(
+            f"serializer changed payload kind from {payload.kind!r} to {result.kind!r}"
+        )
+    return result.value
 
 
-async def deserialize_payload(agent_name: str, value: Any) -> Any:
+async def deserialize_payload(agent_name: str, kind: PayloadKind, value: Any) -> Any:
     """Restore one value after it crosses a durable action boundary."""
-    return await _transform_payload(agent_name, value, serialize=False)
-
-
-async def _dump_json(agent_name: str, value: Any, adapter: Any) -> str:
     if registered_codecs(agent_name) is None:
-        return adapter.dump_json(value).decode()
-    wire_value = adapter.dump_python(value, mode="python")
-    transformed = await _transform_payload(agent_name, wire_value, serialize=True)
+        return value
+    payload = SerializedPayload(kind=kind, value=value)
+    result = payload_adapter.validate_python(
+        await _transform_payload(agent_name, payload, serialize=False)
+    )
+    if result.kind != kind:
+        raise ValueError(f"deserializer changed payload kind from {kind!r} to {result.kind!r}")
+    return result.value
+
+
+async def _dump_json(agent_name: str, payload: Payload, adapter: Any) -> str:
+    if registered_codecs(agent_name) is None:
+        return adapter.dump_json(payload.value).decode()
+    transformed = await serialize_payload(agent_name, payload)
     return wire_adapter.dump_json(transformed).decode()
 
 
-async def _load_json(agent_name: str, value: str, adapter: Any) -> Any:
+async def _load_json(
+    agent_name: str,
+    kind: PayloadKind,
+    value: str,
+    adapter: Any,
+) -> Any:
     if registered_codecs(agent_name) is None:
         return adapter.validate_json(value)
-    transformed = await deserialize_payload(agent_name, wire_adapter.validate_json(value))
+    transformed = await deserialize_payload(
+        agent_name,
+        kind,
+        wire_adapter.validate_json(value),
+    )
     return adapter.validate_python(transformed)
 
 
 async def dump_messages(agent_name: str, messages: list[ModelMessage]) -> str:
-    return await _dump_json(agent_name, messages, ModelMessagesTypeAdapter)
+    return await _dump_json(agent_name, MessagesPayload(value=messages), ModelMessagesTypeAdapter)
 
 
 async def load_messages(agent_name: str, value: str) -> list[ModelMessage]:
-    return await _load_json(agent_name, value, ModelMessagesTypeAdapter)
+    return await _load_json(agent_name, "messages", value, ModelMessagesTypeAdapter)
 
 
 async def dump_message(agent_name: str, message: ModelMessage) -> str:
@@ -110,11 +142,11 @@ async def dump_graph_state(
     agent_name: str,
     state: _agent_graph.GraphAgentState,
 ) -> str:
-    return await _dump_json(agent_name, state, state_adapter)
+    return await _dump_json(agent_name, GraphStatePayload(value=state), state_adapter)
 
 
 async def load_graph_state(agent_name: str, value: str) -> _agent_graph.GraphAgentState:
-    return await _load_json(agent_name, value, state_adapter)
+    return await _load_json(agent_name, "graph_state", value, state_adapter)
 
 
 def dump_tool_call(call: ToolCallPart) -> SerializedToolCall:
@@ -141,9 +173,15 @@ async def dump_node(agent_name: str, node: PersistedPydanticNode) -> AgentNodePa
         return CallToolsNodePayload(
             kind="call_tools",
             model_response=await dump_message(agent_name, node.model_response),
-            tool_call_results=await serialize_payload(agent_name, node.tool_call_results),
+            tool_call_results=await serialize_payload(
+                agent_name,
+                DeferredToolResultsPayload(value=node.tool_call_results),
+            ),
             tool_call_metadata=cast(ToolMetadata | None, node.tool_call_metadata),
-            user_prompt=await serialize_payload(agent_name, node.user_prompt),
+            user_prompt=await serialize_payload(
+                agent_name,
+                UserPromptPayload(value=node.user_prompt),
+            ),
         )
     raise TypeError(f"unsupported Pydantic AI graph node: {type(node).__name__}")
 
@@ -164,7 +202,11 @@ async def load_node(agent_name: str, value: AgentNodePayload) -> PersistedPydant
             )
         case "call_tools":
             assert isinstance(value, CallToolsNodePayload)
-            tool_call_results = await deserialize_payload(agent_name, value.tool_call_results)
+            tool_call_results = await deserialize_payload(
+                agent_name,
+                "deferred_tool_results",
+                value.tool_call_results,
+            )
             return _agent_graph.CallToolsNode(
                 model_response=cast(
                     ModelResponse,
@@ -177,7 +219,11 @@ async def load_node(agent_name: str, value: AgentNodePayload) -> PersistedPydant
                 ),
                 tool_call_metadata=value.tool_call_metadata,
                 user_prompt=user_prompt_adapter.validate_python(
-                    await deserialize_payload(agent_name, value.user_prompt)
+                    await deserialize_payload(
+                        agent_name,
+                        "user_prompt",
+                        value.user_prompt,
+                    )
                 ),
             )
         case kind:

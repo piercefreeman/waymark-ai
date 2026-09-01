@@ -5,19 +5,26 @@ from typing import TypeVar
 from mountaineer_di import strip_depends_from_signature
 from pydantic_ai.agent import AbstractAgent
 
-from .types import PayloadCodec, RegisteredAgent
+from .types import PayloadDeserializer, PayloadSerializer, RegisteredAgent
 
 AgentT = TypeVar("AgentT", bound=RegisteredAgent)
 
 _agents: dict[str, RegisteredAgent] = {}
-_agent_codecs: dict[int, tuple[PayloadCodec, str, PayloadCodec, str]] = {}
+_agent_codecs: dict[
+    int,
+    tuple[PayloadSerializer, str, PayloadDeserializer, str],
+] = {}
 
 
-def _payload_parameter(codec: PayloadCodec, name: str) -> str:
+def _payload_parameter(codec: PayloadSerializer | PayloadDeserializer, name: str) -> str:
     parameters = list(strip_depends_from_signature(codec).parameters.values())
-    if len(parameters) != 1 or parameters[0].kind == inspect.Parameter.POSITIONAL_ONLY:
+    if len(parameters) != 1 or parameters[0].kind not in {
+        inspect.Parameter.POSITIONAL_ONLY,
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+    }:
         raise TypeError(
-            f"{name} must accept one payload argument; other arguments must use Depends(...)"
+            f"{name} must accept one positional payload argument; "
+            "other arguments must use Depends(...)"
         )
     return parameters[0].name
 
@@ -26,8 +33,8 @@ def waymark_agent(
     agent: AgentT,
     *,
     name: str | None = None,
-    serializer: PayloadCodec | None = None,
-    deserializer: PayloadCodec | None = None,
+    serializer: PayloadSerializer | None = None,
+    deserializer: PayloadDeserializer | None = None,
 ) -> AgentT:
     """Register a module-level Pydantic AI agent and its durable payload codecs."""
     frame = inspect.currentframe()
@@ -79,7 +86,7 @@ def registered_agent(reference: str) -> RegisteredAgent:
 
 def registered_codecs(
     reference: str,
-) -> tuple[PayloadCodec, str, PayloadCodec, str] | None:
+) -> tuple[PayloadSerializer, str, PayloadDeserializer, str] | None:
     return _agent_codecs.get(id(registered_agent(reference)))
 
 

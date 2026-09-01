@@ -140,23 +140,24 @@ Register a serializer/deserializer pair to replace them with a small durable ref
 before an action result, graph state, or message history is persisted:
 
 ```python
-from typing import Any
-
 from mountaineer_di import Depends
+from pydantic_ai_waymark import Payload, SerializedPayload
 
 
 async def serialize_payload(
-    payload: Any,
-    db = Depends(get_db_connection),
-) -> Any:
-    return await replace_large_values_with_database_refs(db, payload)
+    payload: Payload,
+    db=Depends(get_db_connection),
+) -> SerializedPayload:
+    value = await replace_large_values_with_database_refs(db, payload.to_python())
+    return payload.serialized(value)
 
 
 async def deserialize_payload(
-    payload: Any,
-    db = Depends(get_db_connection),
-) -> Any:
-    return await restore_database_refs(db, payload)
+    payload: SerializedPayload,
+    db=Depends(get_db_connection),
+) -> Payload:
+    value = await restore_database_refs(db, payload.value)
+    return payload.deserialized(value)
 
 
 support_agent = waymark_agent(
@@ -166,10 +167,18 @@ support_agent = waymark_agent(
 )
 ```
 
-Each codec receives one plain-Python payload tree and may declare additional
+`Payload` is a discriminated union covering graph state, messages, agent output, tool
+output, tool action results, deferred tool results, and user prompts. Match on
+`payload.kind` when a context needs special handling. `payload.to_python()` produces
+the plain-Python tree to transform; `serialized(...)` and `deserialized(...)` preserve
+and validate its kind across the round trip. Codecs may declare additional
 `mountaineer_di.Depends(...)` parameters. Sync and async codecs are supported, and
-generator dependencies remain open for the call and are cleaned up afterward. Return
-JSON-serializable values from the serializer; the deserializer should reverse them.
+generator dependencies remain open for the call and are cleaned up afterward.
+
+The workflow overwrites its current transition and tool-result variables on each
+iteration. Message history is cumulative by design, though, so serializers may see an
+older value again when that history is checkpointed. Use stable keys or upserts when
+storing large values so repeated serialization reuses the same durable reference.
 
 Waymark actions use the same dependency resolver, so application I/O can use the same
 providers without putting database or storage clients in Pydantic AI's per-run `deps`:

@@ -39,6 +39,7 @@ from .serialization import (
 from .types import (
     AgentDeps,
     AgentOutput,
+    AgentOutputPayload,
     AgentResult,
     AgentTransition,
     DoneTransition,
@@ -50,6 +51,7 @@ from .types import (
     ToolActionResult,
     ToolCall,
     ToolMetadata,
+    ToolOutputPayload,
     ToolsTransition,
     UsagePayload,
 )
@@ -125,7 +127,11 @@ async def run_agent_node(
                 node,
             )
             restored_tool_results = tool_action_results_adapter.validate_python(
-                await deserialize_payload(agent_name, tool_results)
+                await deserialize_payload(
+                    agent_name,
+                    "tool_action_results",
+                    tool_results,
+                )
             )
             call_tools_node.tool_call_results = deferred_results(restored_tool_results)
             call_tools_node.tool_call_metadata = (
@@ -172,7 +178,10 @@ async def run_agent_node(
             result = agent_run.result
             assert result is not None
             completed = AgentResult(
-                output=await serialize_payload(agent_name, result.output),
+                output=await serialize_payload(
+                    agent_name,
+                    AgentOutputPayload(value=result.output),
+                ),
                 message_history=await dump_messages(agent_name, result.all_messages()),
                 new_messages=await dump_messages(agent_name, result.new_messages()),
                 usage=UsagePayload.model_validate(
@@ -268,7 +277,10 @@ async def run_agent_tool(
                 "tool_call_id": call.tool_call_id,
                 "tool_name": call.tool_name,
                 "seconds": sleep.seconds,
-                "value": await serialize_payload(agent_name, sleep.result),
+                "value": await serialize_payload(
+                    agent_name,
+                    ToolOutputPayload(value=sleep.result),
+                ),
             }
         except (CallDeferred, ApprovalRequired):
             return {
@@ -280,7 +292,10 @@ async def run_agent_tool(
             "kind": "return",
             "tool_call_id": call.tool_call_id,
             "tool_name": call.tool_name,
-            "value": await serialize_payload(agent_name, value),
+            "value": await serialize_payload(
+                agent_name,
+                ToolOutputPayload(value=value),
+            ),
         }
 
 
