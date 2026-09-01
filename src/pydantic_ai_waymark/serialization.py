@@ -52,9 +52,7 @@ async def _transform_payload(agent_name: str, value: Any, *, serialize: bool) ->
         return value
     serializer, serializer_parameter, deserializer, deserializer_parameter = codecs
     codec, parameter = (
-        (serializer, serializer_parameter)
-        if serialize
-        else (deserializer, deserializer_parameter)
+        (serializer, serializer_parameter) if serialize else (deserializer, deserializer_parameter)
     )
     async with provide_dependencies(codec, {parameter: value}) as kwargs:
         result = codec(**kwargs)

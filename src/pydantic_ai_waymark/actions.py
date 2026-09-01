@@ -88,9 +88,7 @@ async def run_agent_node(
     agent = registered_agent(agent_name)
     deps = restore_agent_deps(agent, deps)
     restored_state = (
-        await load_graph_state(agent_name, transition.state)
-        if transition is not None
-        else None
+        await load_graph_state(agent_name, transition.state) if transition is not None else None
     )
     history = (
         restored_state.message_history
