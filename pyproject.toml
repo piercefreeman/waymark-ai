@@ -9,6 +9,7 @@ description = "Run Pydantic AI graphs with durable Waymark model and tool action
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+  "mountaineer-di>=0.2,<0.3",
   "pydantic-ai-slim>=2.21,<2.22",
   "waymark>=0.30.0.dev7,<0.31",
 ]

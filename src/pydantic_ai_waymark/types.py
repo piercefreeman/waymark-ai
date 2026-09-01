@@ -1,10 +1,10 @@
-from collections.abc import Sequence
-from typing import Any, Literal, TypeAlias, TypedDict
+from collections.abc import Awaitable, Callable, Sequence
+from typing import Any, Concatenate, Literal, TypeAlias, TypedDict
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from pydantic_ai import _agent_graph
 from pydantic_ai.agent import AbstractAgent
-from pydantic_ai.messages import UserContent
+from pydantic_ai.messages import ModelMessage, UserContent
 from pydantic_ai.run import AgentRun
 from pydantic_ai.tools import DeferredToolResult
 from pydantic_core import ErrorDetails
@@ -26,6 +26,7 @@ UserPrompt: TypeAlias = str | Sequence[UserContent] | None
 
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 ToolMetadata: TypeAlias = dict[str, dict[str, JsonValue]]
+_json_value_adapter = TypeAdapter(Any)
 
 
 class WireModel(BaseModel):
@@ -94,9 +95,9 @@ class ModelRequestNodePayload(WireModel):
 class CallToolsNodePayload(WireModel):
     kind: Literal["call_tools"]
     model_response: str
-    tool_call_results: dict[str, DeferredToolResult | Literal["skip"]] | None
+    tool_call_results: Any
     tool_call_metadata: ToolMetadata | None
-    user_prompt: UserPrompt
+    user_prompt: Any
 
 
 AgentNodePayload: TypeAlias = ModelRequestNodePayload | CallToolsNodePayload
@@ -193,3 +194,88 @@ ToolActionResult: TypeAlias = (
     | DeferredToolResultPayload
     | DurableSleepResult
 )
+
+PayloadKind: TypeAlias = Literal[
+    "graph_state",
+    "messages",
+    "agent_output",
+    "tool_output",
+    "tool_action_results",
+    "deferred_tool_results",
+    "user_prompt",
+]
+
+
+class SerializedPayload(WireModel):
+    kind: PayloadKind
+    value: JsonValue
+
+    def deserialized(self, value: object) -> "Payload":
+        return _payload_adapter.validate_python({"kind": self.kind, "value": value})
+
+
+class PayloadBase(WireModel):
+    kind: PayloadKind
+    value: object
+
+    def to_python(self) -> object:
+        return self.model_dump(mode="python")["value"]
+
+    def serialized(self, value: object) -> SerializedPayload:
+        json_value = _json_value_adapter.dump_python(value, mode="json")
+        return SerializedPayload(kind=self.kind, value=json_value)
+
+
+class GraphStatePayload(PayloadBase):
+    kind: Literal["graph_state"] = "graph_state"
+    value: _agent_graph.GraphAgentState
+
+
+class MessagesPayload(PayloadBase):
+    kind: Literal["messages"] = "messages"
+    value: list[ModelMessage]
+
+
+class AgentOutputPayload(PayloadBase):
+    kind: Literal["agent_output"] = "agent_output"
+    value: AgentOutput
+
+
+class ToolOutputPayload(PayloadBase):
+    kind: Literal["tool_output"] = "tool_output"
+    value: ToolValue
+
+
+class ToolActionResultsPayload(PayloadBase):
+    kind: Literal["tool_action_results"] = "tool_action_results"
+    value: list[ToolActionResult]
+
+
+class DeferredToolResultsPayload(PayloadBase):
+    kind: Literal["deferred_tool_results"] = "deferred_tool_results"
+    value: dict[str, DeferredToolResult | Literal["skip"]] | None
+
+
+class UserPromptPayload(PayloadBase):
+    kind: Literal["user_prompt"] = "user_prompt"
+    value: UserPrompt
+
+
+Payload: TypeAlias = (
+    GraphStatePayload
+    | MessagesPayload
+    | AgentOutputPayload
+    | ToolOutputPayload
+    | ToolActionResultsPayload
+    | DeferredToolResultsPayload
+    | UserPromptPayload
+)
+_payload_adapter = TypeAdapter(Payload)
+PayloadSerializer: TypeAlias = Callable[
+    Concatenate[Payload, ...],
+    SerializedPayload | Awaitable[SerializedPayload],
+]
+PayloadDeserializer: TypeAlias = Callable[
+    Concatenate[SerializedPayload, ...],
+    Payload | Awaitable[Payload],
+]

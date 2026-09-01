@@ -504,6 +504,7 @@ name = "pydantic-ai-waymark"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "mountaineer-di" },
     { name = "pydantic-ai-slim" },
     { name = "waymark" },
 ]
@@ -531,6 +532,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", marker = "extra == 'web'", specifier = ">=0.116,<1" },
+    { name = "mountaineer-di", specifier = ">=0.2,<0.3" },
     { name = "pydantic-ai-slim", specifier = ">=2.21,<2.22" },
     { name = "pydantic-ai-slim", extras = ["openai"], marker = "extra == 'openai'", specifier = ">=2.21,<2.22" },
     { name = "uvicorn", marker = "extra == 'web'", specifier = ">=0.35,<1" },

@@ -1,7 +1,7 @@
 from typing import Never, cast
 
 from pydantic import TypeAdapter
-from pydantic_ai import ModelMessagesTypeAdapter, _agent_graph
+from pydantic_ai import _agent_graph
 from pydantic_ai.exceptions import (
     ApprovalRequired,
     CallDeferred,
@@ -20,20 +20,26 @@ from .durability import DurableSleep, PendingToolCallsError, tool_boundary
 from .registry import registered_agent
 from .serialization import (
     deferred_results,
+    deserialize_payload,
     dump_deps_state,
+    dump_graph_state,
+    dump_messages,
     dump_node,
     dump_tool_call,
+    load_graph_state,
+    load_messages,
     load_node,
     load_tool_call,
     restore_agent_deps,
     restore_deps_state,
     restore_graph_state,
-    state_adapter,
+    serialize_payload,
     usage_adapter,
 )
 from .types import (
     AgentDeps,
     AgentOutput,
+    AgentOutputPayload,
     AgentResult,
     AgentTransition,
     DoneTransition,
@@ -45,11 +51,13 @@ from .types import (
     ToolActionResult,
     ToolCall,
     ToolMetadata,
+    ToolOutputPayload,
     ToolsTransition,
     UsagePayload,
 )
 
 tool_metadata_adapter = TypeAdapter(dict[str, JsonValue])
+tool_action_results_adapter = TypeAdapter(list[ToolActionResult])
 
 
 class RetryableAgentError(RuntimeError):
@@ -82,12 +90,12 @@ async def run_agent_node(
     agent = registered_agent(agent_name)
     deps = restore_agent_deps(agent, deps)
     restored_state = (
-        state_adapter.validate_json(transition.state) if transition is not None else None
+        await load_graph_state(agent_name, transition.state) if transition is not None else None
     )
     history = (
         restored_state.message_history
         if restored_state is not None
-        else ModelMessagesTypeAdapter.validate_json(message_history)
+        else await load_messages(agent_name, message_history)
         if message_history is not None
         else None
     )
@@ -107,9 +115,9 @@ async def run_agent_node(
             node = cast(PydanticRunNode, agent_run.next_node)
         else:
             assert transition is not None
-            restore_graph_state(agent_run, transition)
-            await restore_deps_state(agent_run, transition.deps_state)
-            node = load_node(transition.node)
+            restore_graph_state(agent_run, restored_state)
+            await restore_deps_state(agent_name, agent_run, transition.deps_state)
+            node = await load_node(agent_name, transition.node)
 
         if tool_results:
             if not isinstance(node, _agent_graph.CallToolsNode):
@@ -118,13 +126,20 @@ async def run_agent_node(
                 _agent_graph.CallToolsNode[AgentDeps, AgentOutput],
                 node,
             )
-            call_tools_node.tool_call_results = deferred_results(tool_results)
+            restored_tool_results = tool_action_results_adapter.validate_python(
+                await deserialize_payload(
+                    agent_name,
+                    "tool_action_results",
+                    tool_results,
+                )
+            )
+            call_tools_node.tool_call_results = deferred_results(restored_tool_results)
             call_tools_node.tool_call_metadata = (
                 transition.tool_metadata if transition is not None else {}
             )
             # Supplied deferred results bypass Pydantic AI's local tool executor, so
             # mirror its retry bookkeeping before advancing to the next run step.
-            for result in tool_results:
+            for result in restored_tool_results:
                 if result["kind"] in {"retry_prompt", "model_retry"}:
                     agent_run.ctx.deps.tool_manager.failed_tools.add(result["tool_name"])
                 elif result["kind"] == "return":
@@ -139,9 +154,9 @@ async def run_agent_node(
                     tool_metadata[tool_call_id] = tool_metadata_adapter.validate_python(metadata)
             return ToolsTransition(
                 kind="tools",
-                state=state_adapter.dump_json(agent_run.ctx.state).decode(),
-                node=dump_node(cast(PersistedPydanticNode, node)),
-                deps_state=dump_deps_state(agent_run),
+                state=await dump_graph_state(agent_name, agent_run.ctx.state),
+                node=await dump_node(agent_name, cast(PersistedPydanticNode, node)),
+                deps_state=await dump_deps_state(agent_name, agent_run),
                 tool_calls=[
                     _pending_tool_call(
                         call,
@@ -163,9 +178,12 @@ async def run_agent_node(
             result = agent_run.result
             assert result is not None
             completed = AgentResult(
-                output=result.output,
-                message_history=result.all_messages_json().decode(),
-                new_messages=result.new_messages_json().decode(),
+                output=await serialize_payload(
+                    agent_name,
+                    AgentOutputPayload(value=result.output),
+                ),
+                message_history=await dump_messages(agent_name, result.all_messages()),
+                new_messages=await dump_messages(agent_name, result.new_messages()),
                 usage=UsagePayload.model_validate(
                     usage_adapter.dump_python(result.usage, mode="json")
                 ),
@@ -181,9 +199,9 @@ async def run_agent_node(
             raise RuntimeError(f"unsupported next agent node: {type(next_node).__name__}")
         return NodeTransition(
             kind="node",
-            state=state_adapter.dump_json(agent_run.ctx.state).decode(),
-            node=dump_node(next_node),
-            deps_state=dump_deps_state(agent_run),
+            state=await dump_graph_state(agent_name, agent_run.ctx.state),
+            node=await dump_node(agent_name, next_node),
+            deps_state=await dump_deps_state(agent_name, agent_run),
             messages=(
                 [
                     part.content
@@ -208,8 +226,8 @@ async def run_agent_tool(
     """Execute one validated Pydantic AI tool call as a Waymark action."""
     agent = registered_agent(agent_name)
     deps = restore_agent_deps(agent, deps)
-    state = state_adapter.validate_json(transition.state)
-    node = load_node(transition.node)
+    state = await load_graph_state(agent_name, transition.state)
+    node = await load_node(agent_name, transition.node)
     assert isinstance(node, _agent_graph.CallToolsNode)
     call = load_tool_call(tool_call.call)
 
@@ -220,8 +238,8 @@ async def run_agent_tool(
         model=model,
         infer_name=False,
     ) as agent_run:
-        restore_graph_state(agent_run, transition)
-        await restore_deps_state(agent_run, transition.deps_state)
+        restore_graph_state(agent_run, state)
+        await restore_deps_state(agent_name, agent_run, transition.deps_state)
         metadata = transition.tool_metadata.get(call.tool_call_id)
         try:
             value = await agent_run.ctx.deps.tool_manager.handle_call(call, metadata=metadata)
@@ -259,7 +277,10 @@ async def run_agent_tool(
                 "tool_call_id": call.tool_call_id,
                 "tool_name": call.tool_name,
                 "seconds": sleep.seconds,
-                "value": sleep.result,
+                "value": await serialize_payload(
+                    agent_name,
+                    ToolOutputPayload(value=sleep.result),
+                ),
             }
         except (CallDeferred, ApprovalRequired):
             return {
@@ -271,7 +292,10 @@ async def run_agent_tool(
             "kind": "return",
             "tool_call_id": call.tool_call_id,
             "tool_name": call.tool_name,
-            "value": value,
+            "value": await serialize_payload(
+                agent_name,
+                ToolOutputPayload(value=value),
+            ),
         }
 
 
