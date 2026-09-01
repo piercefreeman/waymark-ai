@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any, Literal, TypeAlias, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -6,7 +6,6 @@ from pydantic_ai import _agent_graph
 from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.messages import UserContent
 from pydantic_ai.run import AgentRun
-from pydantic_ai.tools import DeferredToolResult
 from pydantic_core import ErrorDetails
 
 # These three values are deliberately dynamic: users choose the dependency and
@@ -14,6 +13,7 @@ from pydantic_core import ErrorDetails
 AgentDeps: TypeAlias = Any
 AgentOutput: TypeAlias = Any
 ToolValue: TypeAlias = Any
+PayloadCodec: TypeAlias = Callable[..., Any]
 
 RegisteredAgent: TypeAlias = AbstractAgent[AgentDeps, AgentOutput]
 RegisteredAgentRun: TypeAlias = AgentRun[AgentDeps, AgentOutput]
@@ -94,9 +94,9 @@ class ModelRequestNodePayload(WireModel):
 class CallToolsNodePayload(WireModel):
     kind: Literal["call_tools"]
     model_response: str
-    tool_call_results: dict[str, DeferredToolResult | Literal["skip"]] | None
+    tool_call_results: Any
     tool_call_metadata: ToolMetadata | None
-    user_prompt: UserPrompt
+    user_prompt: Any
 
 
 AgentNodePayload: TypeAlias = ModelRequestNodePayload | CallToolsNodePayload

@@ -133,6 +133,56 @@ reply = await MultiAgentWorkflow().run(
 `conversation_id`, and `run_id`. Its serialized representation includes the stable
 agent reference needed by the worker.
 
+## Durable payload codecs
+
+Large tool values such as images should not be copied into every Waymark snapshot.
+Register a serializer/deserializer pair to replace them with a small durable reference
+before an action result, graph state, or message history is persisted:
+
+```python
+from typing import Any
+
+from mountaineer_di import Depends
+
+
+async def serialize_payload(
+    payload: Any,
+    db = Depends(get_db_connection),
+) -> Any:
+    return await replace_large_values_with_database_refs(db, payload)
+
+
+async def deserialize_payload(
+    payload: Any,
+    db = Depends(get_db_connection),
+) -> Any:
+    return await restore_database_refs(db, payload)
+
+
+support_agent = waymark_agent(
+    Agent(..., name="support_agent"),
+    serializer=serialize_payload,
+    deserializer=deserialize_payload,
+)
+```
+
+Each codec receives one plain-Python payload tree and may declare additional
+`mountaineer_di.Depends(...)` parameters. Sync and async codecs are supported, and
+generator dependencies remain open for the call and are cleaned up afterward. Return
+JSON-serializable values from the serializer; the deserializer should reverse them.
+
+Waymark actions use the same dependency resolver, so application I/O can use the same
+providers without putting database or storage clients in Pydantic AI's per-run `deps`:
+
+```python
+from waymark import action
+
+
+@action
+async def save_result(result: dict, db = Depends(get_db_connection)) -> None:
+    await db.insert(result)
+```
+
 ## Extras
 
 We make our best effort to wrap `pydantic-ai`'s features 1:1 - just with the addition of the magic of durable execution. For instance, you can use Pydantic AI's existing retry and timeout settings as usual:

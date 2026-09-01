@@ -2,21 +2,34 @@ import inspect
 from importlib import import_module
 from typing import TypeVar
 
+from mountaineer_di import strip_depends_from_signature
 from pydantic_ai.agent import AbstractAgent
 
-from .types import RegisteredAgent
+from .types import PayloadCodec, RegisteredAgent
 
 AgentT = TypeVar("AgentT", bound=RegisteredAgent)
 
 _agents: dict[str, RegisteredAgent] = {}
+_agent_codecs: dict[int, tuple[PayloadCodec, str, PayloadCodec, str]] = {}
+
+
+def _payload_parameter(codec: PayloadCodec, name: str) -> str:
+    parameters = list(strip_depends_from_signature(codec).parameters.values())
+    if len(parameters) != 1 or parameters[0].kind == inspect.Parameter.POSITIONAL_ONLY:
+        raise TypeError(
+            f"{name} must accept one payload argument; other arguments must use Depends(...)"
+        )
+    return parameters[0].name
 
 
 def waymark_agent(
     agent: AgentT,
     *,
     name: str | None = None,
+    serializer: PayloadCodec | None = None,
+    deserializer: PayloadCodec | None = None,
 ) -> AgentT:
-    """Register a module-level Pydantic AI agent for Waymark workers."""
+    """Register a module-level Pydantic AI agent and its durable payload codecs."""
     frame = inspect.currentframe()
     caller = frame.f_back if frame is not None else None
     if caller is None or caller.f_code.co_name != "<module>":
@@ -28,8 +41,22 @@ def waymark_agent(
         raise RuntimeError("caller module has no valid __name__")
     if not agent_name:
         raise ValueError("the agent needs a name, or pass name= to waymark_agent()")
+    if (serializer is None) != (deserializer is None):
+        raise ValueError("serializer and deserializer must be provided together")
 
+    codecs = None
+    if serializer is not None and deserializer is not None:
+        codecs = (
+            serializer,
+            _payload_parameter(serializer, "serializer"),
+            deserializer,
+            _payload_parameter(deserializer, "deserializer"),
+        )
     _agents[f"{module_name}:{agent_name}"] = agent
+    if codecs is None:
+        _agent_codecs.pop(id(agent), None)
+    else:
+        _agent_codecs[id(agent)] = codecs
     return agent
 
 
@@ -48,6 +75,12 @@ def registered_agent(reference: str) -> RegisteredAgent:
     if matches:
         raise ValueError(f"agent name {reference!r} is ambiguous; use 'module:name'")
     raise KeyError(f"agent {reference!r} is not registered")
+
+
+def registered_codecs(
+    reference: str,
+) -> tuple[PayloadCodec, str, PayloadCodec, str] | None:
+    return _agent_codecs.get(id(registered_agent(reference)))
 
 
 def agent_reference(agent: RegisteredAgent, module_name: str) -> str:

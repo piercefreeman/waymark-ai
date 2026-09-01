@@ -1,12 +1,15 @@
 import asyncio
+import base64
+import hashlib
 import json
-from typing import get_type_hints
+from typing import Annotated, Any, get_type_hints
 
 import httpx
 import pytest
+from mountaineer_di import Depends
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ValidationError
-from pydantic_ai import Agent, ModelMessagesTypeAdapter, RunContext
+from pydantic_ai import Agent, BinaryContent, ModelMessagesTypeAdapter, RunContext
 from pydantic_ai.exceptions import ModelAPIError, ModelRetry
 from pydantic_ai.messages import BinaryImage, ToolReturn
 from pydantic_ai.models.openai import OpenAIChatModel
@@ -39,6 +42,8 @@ def reset_mutable_test_state() -> None:
     approval_calls.clear()
     timeout_calls.clear()
     hook_events.clear()
+    codec_store.blobs.clear()
+    codec_dependency_events.clear()
 
 
 class Answer(BaseModel):
@@ -47,6 +52,64 @@ class Answer(BaseModel):
 
 class AgentDependencies(BaseModel):
     value: str
+
+
+class CodecStore:
+    def __init__(self) -> None:
+        self.blobs: dict[str, bytes] = {}
+
+
+codec_store = CodecStore()
+codec_dependency_events: list[str] = []
+
+
+async def provide_codec_store():
+    codec_dependency_events.append("open")
+    try:
+        yield codec_store
+    finally:
+        codec_dependency_events.append("close")
+
+
+def _serialize_binary(value: Any, store: CodecStore) -> Any:
+    if isinstance(value, dict):
+        if value.get("kind") == "binary" and isinstance(value.get("data"), bytes):
+            data = value["data"]
+            key = hashlib.sha256(data).hexdigest()
+            store.blobs[key] = data
+            return {
+                "kind": "payload-reference",
+                "key": key,
+                "binary": {item: child for item, child in value.items() if item != "data"},
+            }
+        return {item: _serialize_binary(child, store) for item, child in value.items()}
+    if isinstance(value, list):
+        return [_serialize_binary(child, store) for child in value]
+    return value
+
+
+def _deserialize_binary(value: Any, store: CodecStore) -> Any:
+    if isinstance(value, dict):
+        if value.get("kind") == "payload-reference":
+            return {**value["binary"], "data": store.blobs[value["key"]]}
+        return {item: _deserialize_binary(child, store) for item, child in value.items()}
+    if isinstance(value, list):
+        return [_deserialize_binary(child, store) for child in value]
+    return value
+
+
+async def serialize_binary_payload(
+    payload: Any,
+    store: Annotated[CodecStore, Depends(provide_codec_store)],
+) -> Any:
+    return _serialize_binary(payload, store)
+
+
+async def deserialize_binary_payload(
+    payload: Any,
+    store: Annotated[CodecStore, Depends(provide_codec_store)],
+) -> Any:
+    return _deserialize_binary(payload, store)
 
 
 test_agent = waymark_agent(
@@ -76,6 +139,14 @@ tool_calls: list[str] = []
 tool_failures = [0]
 tool_failure_kind = ["retry"]
 tool_agent = waymark_agent(Agent(TestModel(call_tools=["lookup"]), name="tool_agent"))
+codec_agent = waymark_agent(
+    Agent(
+        TestModel(call_tools=["render"], custom_output_text="render complete"),
+        name="codec_agent",
+    ),
+    serializer=serialize_binary_payload,
+    deserializer=deserialize_binary_payload,
+)
 sleep_agent = waymark_agent(Agent(TestModel(call_tools=["pause"]), name="sleep_agent"))
 dependency_agent = waymark_agent(
     Agent(
@@ -119,6 +190,11 @@ def lookup(query: str) -> str:
             raise ModelRetry("transient lookup failure")
         raise RuntimeError("permanent lookup failure")
     return "found"
+
+
+@codec_agent.tool_plain
+def render() -> list[Any]:
+    return ["slide", BinaryContent(data=b"rendered slide", media_type="image/jpeg")]
 
 
 @sleep_agent.tool_plain
@@ -398,6 +474,35 @@ def test_serialized_tool_images_are_rehydrated_before_resuming_agent() -> None:
     assert isinstance(result, ToolReturn)
     assert isinstance(result.return_value, BinaryImage)
     assert result.return_value.data == b"image bytes"
+
+
+def test_payload_codecs_keep_binary_data_out_of_durable_transitions() -> None:
+    async def run() -> AgentResult:
+        transition = None
+        tool_results = []
+        for _ in range(10):
+            transition = await run_agent_node(
+                "codec_agent",
+                "render it",
+                transition,
+                tool_results,
+            )
+            assert base64.b64encode(b"rendered slide").decode() not in transition.model_dump_json()
+            if transition.kind == "done":
+                return transition.result
+            tool_results = [
+                await run_agent_tool("codec_agent", transition, call)
+                for call in transition.tool_calls
+            ]
+            assert base64.b64encode(b"rendered slide").decode() not in json.dumps(tool_results)
+        raise AssertionError("agent did not finish")
+
+    result = asyncio.run(run())
+
+    assert result.output
+    assert list(codec_store.blobs.values()) == [b"rendered slide"]
+    assert codec_dependency_events.count("open") == codec_dependency_events.count("close")
+    assert codec_dependency_events
 
 
 def test_waymark_executes_compiled_agent_state_machine() -> None:
@@ -765,6 +870,24 @@ def test_factory_requires_a_name() -> None:
         exec(
             compile(
                 "unnamed = waymark_agent(Agent(TestModel()))",
+                __file__,
+                "exec",
+            ),
+            {
+                "__name__": __name__,
+                "Agent": Agent,
+                "TestModel": TestModel,
+                "waymark_agent": waymark_agent,
+            },
+        )
+
+
+def test_factory_requires_both_payload_codecs() -> None:
+    with pytest.raises(ValueError, match="must be provided together"):
+        exec(
+            compile(
+                "invalid = waymark_agent("
+                "Agent(TestModel(), name='invalid'), serializer=lambda payload: payload)",
                 __file__,
                 "exec",
             ),
