@@ -2,7 +2,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Concatenate, Literal, TypeAlias, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
-from pydantic_ai import _agent_graph
+from pydantic_ai import ModelMessagesTypeAdapter, _agent_graph
 from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.messages import ModelMessage, UserContent
 from pydantic_ai.run import AgentRun
@@ -27,6 +27,7 @@ UserPrompt: TypeAlias = str | Sequence[UserContent] | None
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 ToolMetadata: TypeAlias = dict[str, dict[str, JsonValue]]
 _json_value_adapter = TypeAdapter(Any)
+_graph_state_adapter = TypeAdapter(_agent_graph.GraphAgentState)
 
 
 class WireModel(BaseModel):
@@ -222,6 +223,10 @@ class SerializedPayload(WireModel):
     value: JsonValue
 
     def deserialized(self, value: object) -> "Payload":
+        if self.kind == "graph_state":
+            value = _graph_state_adapter.validate_python(value)
+        elif self.kind == "messages":
+            value = ModelMessagesTypeAdapter.validate_python(value)
         return _payload_adapter.validate_python({"kind": self.kind, "value": value})
 
 

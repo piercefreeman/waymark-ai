@@ -185,7 +185,9 @@ http_agent = waymark_agent(
             provider=OpenAIProvider(openai_client=openai_client),
         ),
         name="http_agent",
-    )
+    ),
+    serializer=serialize_binary_payload,
+    deserializer=deserialize_binary_payload,
 )
 approval_agent = waymark_agent(
     Agent(TestModel(call_tools=["delete_record"]), name="approval_agent")
