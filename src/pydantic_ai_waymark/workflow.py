@@ -13,11 +13,12 @@ from .actions import (
 )
 from .request import AIRequestBase
 from .types import (
+    AgentCheckpoint,
     AgentResult,
     AgentTransition,
     BackoffConfig,
     JsonValue,
-    PendingTransition,
+    SerializedToolCall,
     ToolActionResult,
     ToolCall,
 )
@@ -40,24 +41,51 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
         the next graph node, stops on a final result, or dispatches its pending tools.
         """
         await self.on_agent_start(request)
-        transition: AgentTransition | None = None
         tool_results: list[ToolActionResult] = []
+        message_history: list[str] = []
+        if request.message_history is not None:
+            message_history.append(request.message_history)
+        checkpoint = AgentCheckpoint(message_history=message_history)
+        transition: AgentTransition | None = None
         while True:
             transition = await self._next_agent_transition(
                 request,
-                transition,
+                checkpoint,
                 tool_results,
             )
             if transition.kind == "done":
-                await self.on_agent_end(request, transition.result)
-                return transition.result
-            for message in transition.messages:
+                result = transition.result
+                transition = None
+                checkpoint = AgentCheckpoint()
+                tool_results = []
+                await self.on_agent_end(request, result)
+                return result
+            message_history = checkpoint.message_history
+            if transition.history_delta is not None:
+                message_history.append(transition.history_delta)
+            messages = transition.messages
+            approvals = transition.approvals
+            tool_calls = transition.tool_calls
+            checkpoint = AgentCheckpoint(
+                state=transition.state,
+                node=transition.node,
+                deps_state=transition.deps_state,
+                tool_metadata=transition.tool_metadata,
+                message_history=message_history,
+            )
+            transition = None
+            message_history = []
+            for message in messages:
                 await self.on_message(request, message)
-            await self._handle_agent_approvals(request.agent_reference, transition)
+            await self._handle_agent_approvals(request.agent_reference, approvals)
+            messages = []
+            approvals = []
             tool_results = await self._handle_agent_tools(
                 request,
-                transition,
+                checkpoint,
+                tool_calls,
             )
+            tool_calls = []
 
     # Overrides
 
@@ -91,7 +119,7 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
     async def _next_agent_transition(
         self,
         request: AIRequestT,
-        transition: AgentTransition | None,
+        checkpoint: AgentCheckpoint,
         tool_results: list[ToolActionResult],
     ) -> AgentTransition:
         """Run the next replay-safe Pydantic AI graph node as a Waymark action.
@@ -108,9 +136,8 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
                     run_agent_node(
                         request.agent_reference,
                         request.prompt,
-                        transition,
+                        checkpoint,
                         tool_results,
-                        message_history=request.message_history,
                         deps=request.deps,
                         model=request.model,
                         conversation_id=request.conversation_id,
@@ -149,20 +176,21 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
     async def _handle_agent_approvals(
         self,
         agent_name: str,
-        transition: PendingTransition,
+        approvals: list[SerializedToolCall],
     ) -> None:
         """Reject a pending transition that contains approval-required tool calls.
 
         ``run_agent`` calls this before dispatching every non-final transition;
         transitions without approval requests pass through unchanged.
         """
-        if transition.approvals:
+        if approvals:
             await raise_approval_required(agent_name)
 
     async def _handle_agent_tools(
         self,
         request: AIRequestT,
-        transition: PendingTransition,
+        checkpoint: AgentCheckpoint,
+        tool_calls: list[ToolCall],
     ) -> list[ToolActionResult]:
         """Execute one transition's tool calls in their required barrier order.
 
@@ -171,21 +199,25 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
         """
         results: list[ToolActionResult] = []
         parallel_calls: list[ToolCall] = []
-        for tool_call in transition.tool_calls:
+        for tool_call in tool_calls:
             if tool_call.sequential:
                 if parallel_calls:
                     parallel_results = await self._run_agent_tool_segment(
-                        request, transition, parallel_calls
+                        request,
+                        checkpoint,
+                        parallel_calls,
                     )
                     for parallel_result in parallel_results:
                         results.append(parallel_result)
                     parallel_calls = []
-                results.append(await self._run_agent_tool_call(request, transition, tool_call))
+                results.append(await self._run_agent_tool_call(request, checkpoint, tool_call))
             else:
                 parallel_calls.append(tool_call)
         if parallel_calls:
             parallel_results = await self._run_agent_tool_segment(
-                request, transition, parallel_calls
+                request,
+                checkpoint,
+                parallel_calls,
             )
             for parallel_result in parallel_results:
                 results.append(parallel_result)
@@ -194,7 +226,7 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
     async def _run_agent_tool_segment(
         self,
         request: AIRequestT,
-        transition: PendingTransition,
+        checkpoint: AgentCheckpoint,
         tool_calls: list[ToolCall],
     ) -> list[ToolActionResult]:
         """Execute one barrier-delimited group of parallelizable tool calls.
@@ -203,11 +235,11 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
         the final call; singleton groups run directly and larger groups fan out.
         """
         if len(tool_calls) == 1:
-            result = await self._run_agent_tool_call(request, transition, tool_calls[0])
+            result = await self._run_agent_tool_call(request, checkpoint, tool_calls[0])
             return [result]
         gathered: list[object] = await asyncio.gather(
             *[
-                self._run_agent_tool_call(request, transition, tool_call)
+                self._run_agent_tool_call(request, checkpoint, tool_call)
                 for tool_call in tool_calls
             ],
             return_exceptions=True,
@@ -218,7 +250,7 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
     async def _run_agent_tool_call(
         self,
         request: AIRequestT,
-        transition: PendingTransition,
+        checkpoint: AgentCheckpoint,
         tool_call: ToolCall,
     ) -> ToolActionResult:
         """Dispatch one tool call through its configured durability boundary.
@@ -235,7 +267,7 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
         action_result = await self.run_action(
             run_agent_tool(
                 request.agent_reference,
-                transition,
+                checkpoint,
                 tool_call,
                 deps=request.deps,
                 model=request.model,

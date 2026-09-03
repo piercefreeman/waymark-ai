@@ -175,10 +175,12 @@ and validate its kind across the round trip. Codecs may declare additional
 `mountaineer_di.Depends(...)` parameters. Sync and async codecs are supported, and
 generator dependencies remain open for the call and are cleaned up afterward.
 
-The workflow overwrites its current transition and tool-result variables on each
-iteration. Message history is cumulative by design, though, so serializers may see an
-older value again when that history is checkpointed. Use stable keys or upserts when
-storing large values so repeated serialization reuses the same durable reference.
+The workflow keeps one current checkpoint and stores message history as ordered deltas.
+Pending model-action results contain only the messages added by that action, preventing
+Waymark's retained action results from accumulating successively larger history copies.
+Graph-state payloads therefore exclude message history; `messages` payloads are
+reassembled before each agent step. Use stable keys or upserts when storing large values
+so repeated serialization reuses the same durable reference.
 
 Waymark actions use the same dependency resolver, so application I/O can use the same
 providers without putting database or storage clients in Pydantic AI's per-run `deps`:

@@ -16,9 +16,11 @@ from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pytest_httpx import HTTPXMock
-from waymark import action, workflow
+from waymark import action, bridge, workflow
+from waymark.actions import serialize_result_payload
 
 from pydantic_ai_waymark import (
+    AgentCheckpoint,
     AgentResult,
     AIRequestBase,
     BackoffConfig,
@@ -47,6 +49,7 @@ def reset_mutable_test_state() -> None:
     codec_store.blobs.clear()
     codec_dependency_events.clear()
     codec_payload_kinds.clear()
+    history_failures[0] = 0
 
 
 class Answer(BaseModel):
@@ -145,6 +148,12 @@ tool_calls: list[str] = []
 tool_failures = [0]
 tool_failure_kind = ["retry"]
 tool_agent = waymark_agent(Agent(TestModel(call_tools=["lookup"]), name="tool_agent"))
+history_agent = waymark_agent(
+    Agent(
+        TestModel(call_tools=["grow_history"], custom_output_text="done"),
+        name="history_agent",
+    )
+)
 codec_agent = waymark_agent(
     Agent(
         TestModel(call_tools=["render"], custom_output_text="render complete"),
@@ -185,6 +194,7 @@ timeout_agent = waymark_agent(Agent(TestModel(call_tools=["slow_tool"]), name="t
 approval_calls: list[str] = []
 timeout_calls: list[str] = []
 hook_events: list[tuple[str, str | None, str | None, object]] = []
+history_failures = [0]
 
 
 @tool_agent.tool_plain(retries=1, timeout=10)
@@ -195,6 +205,14 @@ def lookup(query: str) -> str:
         if tool_failure_kind[0] == "retry":
             raise ModelRetry("transient lookup failure")
         raise RuntimeError("permanent lookup failure")
+    return "found"
+
+
+@history_agent.tool_plain(retries=10)
+def grow_history() -> str:
+    if history_failures[0]:
+        history_failures[0] -= 1
+        raise ModelRetry("x" * 10_000)
     return "found"
 
 
@@ -262,6 +280,10 @@ class ToolRequest(AIRequestBase[None]):
     agent = tool_agent
 
 
+class HistoryRequest(AIRequestBase[None]):
+    agent = history_agent
+
+
 class SleepRequest(AIRequestBase[None]):
     agent = sleep_agent
 
@@ -306,6 +328,12 @@ class AgentWorkflow(PydanticAIWorkflow[AgentRequest]):
 class ToolWorkflow(PydanticAIWorkflow[ToolRequest]):
     async def run(self, request: ToolRequest) -> str:
         return (await self.run_agent(request)).output
+
+
+@workflow
+class HistoryWorkflow(PydanticAIWorkflow[HistoryRequest]):
+    async def run(self, request: HistoryRequest) -> AgentResult:
+        return await self.run_agent(request)
 
 
 @workflow
@@ -422,21 +450,31 @@ OPENAI_RESPONSE = {
 
 
 async def drive(agent_name: str) -> tuple[AgentResult, int]:
-    transition = None
     tool_results = []
+    checkpoint = AgentCheckpoint()
     for step_count in range(1, 10):
         transition = await run_agent_node(
             agent_name,
             "answer this",
-            transition,
+            checkpoint,
             tool_results,
         )
         assert isinstance(transition, BaseModel)
         tool_results = []
         if transition.kind == "done":
             return transition.result, step_count
+        message_history = checkpoint.message_history
+        if transition.history_delta is not None:
+            message_history.append(transition.history_delta)
+        checkpoint = AgentCheckpoint(
+            state=transition.state,
+            node=transition.node,
+            deps_state=transition.deps_state,
+            tool_metadata=transition.tool_metadata,
+            message_history=message_history,
+        )
         tool_results = [
-            await run_agent_tool(agent_name, transition, call) for call in transition.tool_calls
+            await run_agent_tool(agent_name, checkpoint, call) for call in transition.tool_calls
         ]
     raise AssertionError("agent did not finish")
 
@@ -484,20 +522,30 @@ def test_serialized_tool_images_are_rehydrated_before_resuming_agent() -> None:
 
 def test_payload_codecs_keep_binary_data_out_of_durable_transitions() -> None:
     async def run() -> AgentResult:
-        transition = None
         tool_results = []
+        checkpoint = AgentCheckpoint()
         for _ in range(10):
             transition = await run_agent_node(
                 "codec_agent",
                 "render it",
-                transition,
+                checkpoint,
                 tool_results,
             )
             assert base64.b64encode(b"rendered slide").decode() not in transition.model_dump_json()
             if transition.kind == "done":
                 return transition.result
+            message_history = checkpoint.message_history
+            if transition.history_delta is not None:
+                message_history.append(transition.history_delta)
+            checkpoint = AgentCheckpoint(
+                state=transition.state,
+                node=transition.node,
+                deps_state=transition.deps_state,
+                tool_metadata=transition.tool_metadata,
+                message_history=message_history,
+            )
             tool_results = [
-                await run_agent_tool("codec_agent", transition, call)
+                await run_agent_tool("codec_agent", checkpoint, call)
                 for call in transition.tool_calls
             ]
             assert base64.b64encode(b"rendered slide").decode() not in json.dumps(tool_results)
@@ -769,6 +817,26 @@ def test_pydantic_tool_retry_survives_across_waymark_actions() -> None:
 
     assert result == '{"lookup":"found"}'
     assert tool_calls == ["a", "a"]
+
+
+def test_model_action_state_grows_linearly_with_message_history(monkeypatch) -> None:
+    """Old model results must not retain successively larger history copies."""
+    history_failures[0] = 8
+    node_result_sizes: list[int] = []
+    execute_action = bridge.execute_action
+
+    async def record_action_result(dispatch):
+        result = await execute_action(dispatch)
+        if dispatch.action_name == "pydantic_ai_agent_node" and result.exception is None:
+            node_result_sizes.append(
+                len(serialize_result_payload(result.result).SerializeToString())
+            )
+        return result
+
+    monkeypatch.setattr(bridge, "execute_action", record_action_result)
+    result = asyncio.run(HistoryWorkflow().run(HistoryRequest(prompt="grow")))
+
+    assert sum(node_result_sizes) < 6 * len(result.message_history.encode())
 
 
 def test_unhandled_tool_exception_fails_without_retry() -> None:

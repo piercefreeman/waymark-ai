@@ -122,6 +122,7 @@ class RunningTransition(WireModel):
     state: str
     node: AgentNodePayload
     deps_state: DepsState
+    history_delta: str | None = None
     messages: list[str] = Field(default_factory=list)
     tool_calls: list[ToolCall] = Field(default_factory=list)
     approvals: list[SerializedToolCall] = Field(default_factory=list)
@@ -149,6 +150,16 @@ class DoneTransition(WireModel):
 
 PendingTransition: TypeAlias = NodeTransition | ToolsTransition
 AgentTransition: TypeAlias = PendingTransition | DoneTransition
+
+
+class AgentCheckpoint(WireModel):
+    """Only the state needed to execute the agent's next durable step."""
+
+    state: str | None = None
+    node: AgentNodePayload | None = None
+    deps_state: DepsState | None = None
+    tool_metadata: ToolMetadata = Field(default_factory=dict)
+    message_history: list[str] = Field(default_factory=list)
 
 
 class ToolResultBase(TypedDict):
