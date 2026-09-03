@@ -27,7 +27,7 @@ from .serialization import (
     dump_node,
     dump_tool_call,
     load_graph_state,
-    load_messages,
+    load_message_history,
     load_node,
     load_tool_call,
     restore_agent_deps,
@@ -37,6 +37,7 @@ from .serialization import (
     usage_adapter,
 )
 from .types import (
+    AgentCheckpoint,
     AgentDeps,
     AgentOutput,
     AgentOutputPayload,
@@ -45,7 +46,6 @@ from .types import (
     DoneTransition,
     JsonValue,
     NodeTransition,
-    PendingTransition,
     PersistedPydanticNode,
     PydanticRunNode,
     ToolActionResult,
@@ -75,38 +75,34 @@ def _pending_tool_call(call: ToolCallPart, *, sequential: bool) -> ToolCall:
 async def run_agent_node(
     agent_name: str,
     prompt: str | None,
-    transition: AgentTransition | None = None,
+    checkpoint: AgentCheckpoint,
     tool_results: list[ToolActionResult] | None = None,
     *,
-    message_history: str | None = None,
     deps: AgentDeps = None,
     model: str | None = None,
     conversation_id: str | None = None,
     run_id: str | None = None,
 ) -> AgentTransition:
     """Run exactly one Pydantic AI graph node as a Waymark action."""
-    if transition is not None and transition.kind == "done":
-        raise RuntimeError("a completed agent transition cannot be resumed")
     agent = registered_agent(agent_name)
     deps = restore_agent_deps(agent, deps)
     restored_state = (
-        await load_graph_state(agent_name, transition.state) if transition is not None else None
-    )
-    history = (
-        restored_state.message_history
-        if restored_state is not None
-        else await load_messages(agent_name, message_history)
-        if message_history is not None
+        await load_graph_state(agent_name, checkpoint.state)
+        if checkpoint.state is not None
         else None
     )
+    history = await load_message_history(agent_name, checkpoint.message_history)
+    if restored_state is not None:
+        restored_state.message_history = history
+    history_size = len(history)
 
     async with agent.iter(
         prompt,
-        message_history=history,
+        message_history=history or None,
         deps=deps,
         model=model,
-        conversation_id=conversation_id if transition is None else None,
-        run_id=run_id if transition is None else None,
+        conversation_id=conversation_id if checkpoint.state is None else None,
+        run_id=run_id if checkpoint.state is None else None,
         infer_name=False,
         capabilities=[tool_boundary],
     ) as agent_run:
@@ -114,10 +110,11 @@ async def run_agent_node(
         if restored_state is None:
             node = cast(PydanticRunNode, agent_run.next_node)
         else:
-            assert transition is not None
+            if checkpoint.node is None or checkpoint.deps_state is None:
+                raise RuntimeError("resumed agent checkpoint is incomplete")
             restore_graph_state(agent_run, restored_state)
-            await restore_deps_state(agent_name, agent_run, transition.deps_state)
-            node = await load_node(agent_name, transition.node)
+            await restore_deps_state(agent_name, agent_run, checkpoint.deps_state)
+            node = await load_node(agent_name, checkpoint.node)
 
         if tool_results:
             if not isinstance(node, _agent_graph.CallToolsNode):
@@ -134,9 +131,7 @@ async def run_agent_node(
                 )
             )
             call_tools_node.tool_call_results = deferred_results(restored_tool_results)
-            call_tools_node.tool_call_metadata = (
-                transition.tool_metadata if transition is not None else {}
-            )
+            call_tools_node.tool_call_metadata = checkpoint.tool_metadata
             # Supplied deferred results bypass Pydantic AI's local tool executor, so
             # mirror its retry bookkeeping before advancing to the next run step.
             for result in restored_tool_results:
@@ -157,6 +152,14 @@ async def run_agent_node(
                 state=await dump_graph_state(agent_name, agent_run.ctx.state),
                 node=await dump_node(agent_name, cast(PersistedPydanticNode, node)),
                 deps_state=await dump_deps_state(agent_name, agent_run),
+                history_delta=(
+                    await dump_messages(
+                        agent_name,
+                        agent_run.ctx.state.message_history[history_size:],
+                    )
+                    if len(agent_run.ctx.state.message_history) > history_size
+                    else None
+                ),
                 tool_calls=[
                     _pending_tool_call(
                         call,
@@ -202,6 +205,14 @@ async def run_agent_node(
             state=await dump_graph_state(agent_name, agent_run.ctx.state),
             node=await dump_node(agent_name, next_node),
             deps_state=await dump_deps_state(agent_name, agent_run),
+            history_delta=(
+                await dump_messages(
+                    agent_name,
+                    agent_run.ctx.state.message_history[history_size:],
+                )
+                if len(agent_run.ctx.state.message_history) > history_size
+                else None
+            ),
             messages=(
                 [
                     part.content
@@ -217,7 +228,7 @@ async def run_agent_node(
 @action(name="pydantic_ai_agent_tool")
 async def run_agent_tool(
     agent_name: str,
-    transition: PendingTransition,
+    checkpoint: AgentCheckpoint,
     tool_call: ToolCall,
     *,
     deps: AgentDeps = None,
@@ -226,8 +237,11 @@ async def run_agent_tool(
     """Execute one validated Pydantic AI tool call as a Waymark action."""
     agent = registered_agent(agent_name)
     deps = restore_agent_deps(agent, deps)
-    state = await load_graph_state(agent_name, transition.state)
-    node = await load_node(agent_name, transition.node)
+    if checkpoint.state is None or checkpoint.node is None or checkpoint.deps_state is None:
+        raise RuntimeError("tool agent checkpoint is incomplete")
+    state = await load_graph_state(agent_name, checkpoint.state)
+    state.message_history = await load_message_history(agent_name, checkpoint.message_history)
+    node = await load_node(agent_name, checkpoint.node)
     assert isinstance(node, _agent_graph.CallToolsNode)
     call = load_tool_call(tool_call.call)
 
@@ -239,8 +253,8 @@ async def run_agent_tool(
         infer_name=False,
     ) as agent_run:
         restore_graph_state(agent_run, state)
-        await restore_deps_state(agent_name, agent_run, transition.deps_state)
-        metadata = transition.tool_metadata.get(call.tool_call_id)
+        await restore_deps_state(agent_name, agent_run, checkpoint.deps_state)
+        metadata = checkpoint.tool_metadata.get(call.tool_call_id)
         try:
             value = await agent_run.ctx.deps.tool_manager.handle_call(call, metadata=metadata)
         except ToolRetryError as error:

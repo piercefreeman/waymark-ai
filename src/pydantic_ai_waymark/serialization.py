@@ -127,6 +127,13 @@ async def load_messages(agent_name: str, value: str) -> list[ModelMessage]:
     return await _load_json(agent_name, "messages", value, ModelMessagesTypeAdapter)
 
 
+async def load_message_history(agent_name: str, chunks: list[str] | None) -> list[ModelMessage]:
+    history: list[ModelMessage] = []
+    for chunk in chunks or []:
+        history.extend(await load_messages(agent_name, chunk))
+    return history
+
+
 async def dump_message(agent_name: str, message: ModelMessage) -> str:
     return await dump_messages(agent_name, [message])
 
@@ -142,7 +149,11 @@ async def dump_graph_state(
     agent_name: str,
     state: _agent_graph.GraphAgentState,
 ) -> str:
-    return await _dump_json(agent_name, GraphStatePayload(value=state), state_adapter)
+    return await _dump_json(
+        agent_name,
+        GraphStatePayload(value=replace(state, message_history=[])),
+        state_adapter,
+    )
 
 
 async def load_graph_state(agent_name: str, value: str) -> _agent_graph.GraphAgentState:

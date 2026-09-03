@@ -1,4 +1,5 @@
 from .agent import (
+    AgentCheckpoint,
     AgentResult,
     AIRequestBase,
     BackoffConfig,
@@ -13,6 +14,7 @@ from .types import Payload, SerializedPayload
 
 __all__ = [
     "AIRequestBase",
+    "AgentCheckpoint",
     "AgentResult",
     "BackoffConfig",
     "DurableSleep",
