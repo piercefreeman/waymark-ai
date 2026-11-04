@@ -15,6 +15,7 @@ from pydantic_ai.messages import BinaryImage, ToolReturn
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.toolsets import FunctionToolset
 from pytest_httpx import HTTPXMock
 from waymark import action, bridge, workflow
 from waymark.actions import serialize_result_payload
@@ -144,6 +145,24 @@ def transient_planning() -> str:
     return "Answer the request."
 
 
+toolset_failures = [0]
+
+
+def toolset_lookup() -> str:
+    if toolset_failures[0]:
+        toolset_failures[0] -= 1
+        raise ModelRetry("transient toolset failure")
+    return "found"
+
+
+toolset_agent = waymark_agent(
+    Agent(
+        TestModel(call_tools=["toolset_lookup"]),
+        name="toolset_agent",
+        retries=2,
+        toolsets=[FunctionToolset([toolset_lookup])],
+    )
+)
 tool_calls: list[str] = []
 tool_failures = [0]
 tool_failure_kind = ["retry"]
@@ -282,6 +301,10 @@ class ToolRequest(AIRequestBase[None]):
     agent = tool_agent
 
 
+class ToolsetRequest(AIRequestBase[None]):
+    agent = toolset_agent
+
+
 class HistoryRequest(AIRequestBase[None]):
     agent = history_agent
 
@@ -329,6 +352,12 @@ class AgentWorkflow(PydanticAIWorkflow[AgentRequest]):
 @workflow
 class ToolWorkflow(PydanticAIWorkflow[ToolRequest]):
     async def run(self, request: ToolRequest) -> str:
+        return (await self.run_agent(request)).output
+
+
+@workflow
+class ToolsetWorkflow(PydanticAIWorkflow[ToolsetRequest]):
+    async def run(self, request: ToolsetRequest) -> str:
         return (await self.run_agent(request)).output
 
 
@@ -819,6 +848,15 @@ def test_pydantic_tool_retry_survives_across_waymark_actions() -> None:
 
     assert result == '{"lookup":"found"}'
     assert tool_calls == ["a", "a"]
+
+
+def test_toolset_tool_retry_uses_agent_retry_budget() -> None:
+    toolset_failures[0] = 1
+
+    result = asyncio.run(ToolsetWorkflow().run(ToolsetRequest(prompt="answer this")))
+
+    assert result == '{"toolset_lookup":"found"}'
+    assert toolset_failures[0] == 0
 
 
 def test_model_action_state_grows_linearly_with_message_history(monkeypatch) -> None:
