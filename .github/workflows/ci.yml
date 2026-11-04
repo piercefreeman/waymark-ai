@@ -33,9 +33,9 @@ jobs:
 
       - name: Run linting
         run: |
-          uv run ruff format --check src tests examples
-          uv run ruff check src tests examples
-          uv run ty check src tests examples
+          uv run ruff format --check src tests examples scripts
+          uv run ruff check src tests examples scripts
+          uv run ty check src tests examples scripts
           uv run --with-editable ../deterministic determystic validate
 
   test:
@@ -58,3 +58,58 @@ jobs:
 
       - name: Run tests
         run: uv run pytest
+
+  pydantic-ai-matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.generate.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Generate Pydantic AI compatibility matrix
+        id: generate
+        run: |
+          {
+            echo 'matrix<<EOF'
+            uv run scripts/pydantic_ai_version_matrix.py --minimum 2.21
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+  pydantic-ai-compat:
+    name: pydantic-ai ${{ matrix.label }}
+    needs: [pydantic-ai-matrix]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.pydantic-ai-matrix.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies with ${{ matrix.package }} ${{ matrix.version }}
+        run: |
+          uv sync --frozen
+          uv pip install "${{ matrix.package }}[openai]==${{ matrix.version }}"
+          uv pip show ${{ matrix.package }} pydantic-graph openai
+
+      - name: Run tests
+        run: uv run --no-sync pytest

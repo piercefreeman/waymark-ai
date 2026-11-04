@@ -1,10 +1,13 @@
 import asyncio
 import base64
 import hashlib
+import importlib
 import json
+from collections import deque
+from collections.abc import Iterator
 from typing import Annotated, Any, get_type_hints
 
-import httpx
+import openai
 import pytest
 from mountaineer_di import Depends
 from openai import AsyncOpenAI
@@ -16,7 +19,6 @@ from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.toolsets import FunctionToolset
-from pytest_httpx import HTTPXMock
 from waymark import action, bridge, workflow
 from waymark.actions import serialize_result_payload
 
@@ -34,6 +36,46 @@ from pydantic_ai_waymark import (
     waymark_agent,
 )
 from pydantic_ai_waymark.serialization import deferred_results
+
+# NOTE: openai<3 sends requests through `httpx` and openai>=3 through `httpx2`. Mock
+# whichever transport library the installed SDK uses so one suite covers both.
+openai_http: Any = importlib.import_module(
+    openai.DefaultAsyncHttpxClient.__mro__[1].__module__.split(".")[0]
+)
+
+
+class OpenAIMock:
+    """Queue canned OpenAI responses or transport errors and record each request."""
+
+    def __init__(self) -> None:
+        self.queued: deque[Any] = deque()
+        self.requests: list[Any] = []
+
+    def add_response(self, *, status_code: int, json: object) -> None:
+        self.queued.append(openai_http.Response(status_code, json=json))
+
+    def add_exception(self, error: Exception) -> None:
+        self.queued.append(error)
+
+    def handle(self, request: Any) -> Any:
+        self.requests.append(request)
+        if not self.queued:
+            raise AssertionError(f"unexpected OpenAI request: {request.method} {request.url}")
+        queued = self.queued.popleft()
+        if isinstance(queued, Exception):
+            raise queued
+        return queued
+
+
+openai_transport_mock = OpenAIMock()
+
+
+@pytest.fixture
+def openai_mock() -> Iterator[OpenAIMock]:
+    openai_transport_mock.queued.clear()
+    openai_transport_mock.requests.clear()
+    yield openai_transport_mock
+    assert not openai_transport_mock.queued, "mocked OpenAI responses were not requested"
 
 
 @pytest.fixture(autouse=True)
@@ -196,7 +238,13 @@ parallel_agent = waymark_agent(
         name="parallel_agent",
     )
 )
-openai_client = AsyncOpenAI(api_key="test", max_retries=0)
+openai_client = AsyncOpenAI(
+    api_key="test",
+    max_retries=0,
+    http_client=openai.DefaultAsyncHttpxClient(
+        transport=openai_http.MockTransport(openai_transport_mock.handle)
+    ),
+)
 http_agent = waymark_agent(
     Agent(
         OpenAIChatModel(
@@ -458,7 +506,6 @@ class UnionWorkflow(PydanticAIWorkflow[AgentRequest | ToolRequest]):
         return (await self.run_agent(request)).output
 
 
-OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 OPENAI_RESPONSE = {
     "id": "chatcmpl-test",
     "object": "chat.completion",
@@ -670,15 +717,13 @@ def test_model_retry_attempts_and_backoff_are_bounded() -> None:
 
 @pytest.mark.parametrize("status_code", [408, 409, 429, 500, 503])
 def test_retryable_openai_http_errors_rerun_the_graph_action(
-    httpx_mock: HTTPXMock,
+    openai_mock: OpenAIMock,
     status_code: int,
 ) -> None:
-    httpx_mock.add_response(
-        status_code=status_code,
-        json={"error": {"message": "temporary", "type": "server_error"}},
-        url=OPENAI_URL,
+    openai_mock.add_response(
+        status_code=status_code, json={"error": {"message": "temporary", "type": "server_error"}}
     )
-    httpx_mock.add_response(status_code=200, json=OPENAI_RESPONSE, url=OPENAI_URL)
+    openai_mock.add_response(status_code=200, json=OPENAI_RESPONSE)
 
     result = asyncio.run(
         HttpWorkflow().run(
@@ -690,13 +735,13 @@ def test_retryable_openai_http_errors_rerun_the_graph_action(
     )
 
     assert result.output == "provider durable"
-    assert len(httpx_mock.get_requests()) == 2
+    assert len(openai_mock.requests) == 2
 
 
 def test_openai_provider_specific_usage_survives_the_waymark_boundary(
-    httpx_mock: HTTPXMock,
+    openai_mock: OpenAIMock,
 ) -> None:
-    httpx_mock.add_response(status_code=200, json=OPENAI_RESPONSE, url=OPENAI_URL)
+    openai_mock.add_response(status_code=200, json=OPENAI_RESPONSE)
 
     result = asyncio.run(
         HttpWorkflow().run(
@@ -708,37 +753,38 @@ def test_openai_provider_specific_usage_survives_the_waymark_boundary(
     )
 
     assert result.output == "provider durable"
-    assert result.usage.model_extra == {"output_reasoning_tokens": 0}
+    # NOTE: Newer Pydantic AI releases add usage fields of their own (cost, audio, cache
+    # tiers), so only assert that the provider-specific key crosses the boundary intact.
+    assert (result.usage.model_extra or {}).get("output_reasoning_tokens") == 0
 
 
 @pytest.mark.parametrize("status_code", [400, 401, 403, 404, 422])
 def test_permanent_openai_http_errors_fail_without_adapter_retry(
-    httpx_mock: HTTPXMock,
+    openai_mock: OpenAIMock,
     status_code: int,
 ) -> None:
-    httpx_mock.add_response(
+    openai_mock.add_response(
         status_code=status_code,
         json={"error": {"message": "permanent", "type": "invalid_request_error"}},
-        url=OPENAI_URL,
     )
 
     with pytest.raises(RuntimeError, match=rf"status_code: {status_code}"):
         asyncio.run(HttpWorkflow().run(HttpRequest(prompt="answer this")))
 
-    assert len(httpx_mock.get_requests()) == 1
+    assert len(openai_mock.requests) == 1
 
 
 @pytest.mark.parametrize(
     "transport_error",
-    [httpx.ConnectError("offline"), httpx.ReadTimeout("timed out")],
+    [openai_http.ConnectError("offline"), openai_http.ReadTimeout("timed out")],
     ids=["connect", "timeout"],
 )
 def test_openai_transport_errors_are_retryable(
-    httpx_mock: HTTPXMock,
-    transport_error: httpx.HTTPError,
+    openai_mock: OpenAIMock,
+    transport_error: Exception,
 ) -> None:
-    httpx_mock.add_exception(transport_error, url=OPENAI_URL)
-    httpx_mock.add_response(status_code=200, json=OPENAI_RESPONSE, url=OPENAI_URL)
+    openai_mock.add_exception(transport_error)
+    openai_mock.add_response(status_code=200, json=OPENAI_RESPONSE)
 
     result = asyncio.run(
         HttpWorkflow().run(
@@ -750,17 +796,15 @@ def test_openai_transport_errors_are_retryable(
     )
 
     assert result.output == "provider durable"
-    assert len(httpx_mock.get_requests()) == 2
+    assert len(openai_mock.requests) == 2
 
 
 def test_retryable_openai_errors_stop_at_configured_attempts(
-    httpx_mock: HTTPXMock,
+    openai_mock: OpenAIMock,
 ) -> None:
     for _ in range(2):
-        httpx_mock.add_response(
-            status_code=429,
-            json={"error": {"message": "rate limited", "type": "rate_limit_error"}},
-            url=OPENAI_URL,
+        openai_mock.add_response(
+            status_code=429, json={"error": {"message": "rate limited", "type": "rate_limit_error"}}
         )
 
     with pytest.raises(RuntimeError, match="failed after 2 transient attempts"):
@@ -777,7 +821,7 @@ def test_retryable_openai_errors_stop_at_configured_attempts(
             )
         )
 
-    assert len(httpx_mock.get_requests()) == 2
+    assert len(openai_mock.requests) == 2
 
 
 def test_model_retry_control_flow_is_compiled_into_waymark_ir() -> None:

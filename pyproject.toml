@@ -9,22 +9,22 @@ description = "Run Pydantic AI graphs with durable Waymark model and tool action
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-  "mountaineer-di>=0.2,<0.3",
-  "pydantic-ai-slim>=2.21,<2.22",
+  "mountaineer-di>=0.2",
+  "pydantic-ai-slim>=2.21,<3",
   "waymark>=0.30.0.dev7,<0.31",
 ]
 
 [project.optional-dependencies]
-openai = ["pydantic-ai-slim[openai]>=2.21,<2.22"]
+openai = ["pydantic-ai-slim[openai]>=2.21,<3"]
 web = ["fastapi>=0.116,<1", "uvicorn>=0.35,<1"]
 
 [dependency-groups]
 dev = [
+  "click>=8.1",
   "fastapi>=0.116,<1",
   "httpx>=0.28,<1",
-  "pydantic-ai-slim[openai]>=2.21,<2.22",
+  "pydantic-ai-slim[openai]>=2.21,<3",
   "pytest>=8",
-  "pytest-httpx>=0.36.2",
   "ruff>=0.12",
   "ty>=0.0.1a26",
 ]

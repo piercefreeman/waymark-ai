@@ -12,7 +12,7 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
-    RetryPromptPart,
+    RetryPromptPart,  # ty: ignore[deprecated]
     ToolCallPart,
     tool_return_content_ta,
 )
@@ -241,6 +241,26 @@ async def load_node(agent_name: str, value: AgentNodePayload) -> PersistedPydant
             raise ValueError(f"unknown Pydantic AI graph node kind: {kind!r}")
 
 
+def bind_node_to_history(
+    node: PersistedPydanticNode,
+    history: list[ModelMessage],
+) -> PersistedPydanticNode:
+    """Point a restored call-tools node at its response inside the restored history.
+
+    Newer Pydantic AI releases locate a node's serving response in the message history by
+    identity, so an equal-but-separately-deserialized copy is not enough.
+    """
+    if not isinstance(node, _agent_graph.CallToolsNode):
+        return node
+    for message in reversed(history):
+        if message is node.model_response:
+            return node
+        if isinstance(message, ModelResponse) and message == node.model_response:
+            node.model_response = message
+            return node
+    return node
+
+
 async def dump_deps_state(agent_name: str, agent_run: RegisteredAgentRun) -> DepsState:
     deps = agent_run.ctx.deps
     tool_manager = deps.tool_manager
@@ -322,7 +342,9 @@ def deferred_results(
         elif result["kind"] == "tool_failed":
             calls[tool_call_id] = ToolFailed(result["message"])
         elif result["kind"] == "retry_prompt":
-            calls[tool_call_id] = RetryPromptPart(
+            # NOTE: Deprecated in newer Pydantic AI, but its replacements do not exist in
+            # the oldest supported release; newer releases translate it on receipt.
+            calls[tool_call_id] = RetryPromptPart(  # ty: ignore[deprecated]
                 content=result["content"],
                 tool_name=result["tool_name"],
                 tool_call_id=tool_call_id,

@@ -13,12 +13,14 @@ from pydantic_ai.exceptions import (
     ToolRetryError,
 )
 from pydantic_ai.messages import TextPart, ToolCallPart
+from pydantic_core import ErrorDetails
 from pydantic_graph import End
 from waymark import action
 
 from .durability import DurableSleep, PendingToolCallsError, tool_boundary
 from .registry import registered_agent
 from .serialization import (
+    bind_node_to_history,
     deferred_results,
     deserialize_payload,
     dump_deps_state,
@@ -114,7 +116,10 @@ async def run_agent_node(
                 raise RuntimeError("resumed agent checkpoint is incomplete")
             restore_graph_state(agent_run, restored_state)
             await restore_deps_state(agent_name, agent_run, checkpoint.deps_state)
-            node = await load_node(agent_name, checkpoint.node)
+            node = bind_node_to_history(
+                await load_node(agent_name, checkpoint.node),
+                agent_run.ctx.state.message_history,
+            )
 
         if tool_results:
             if not isinstance(node, _agent_graph.CallToolsNode):
@@ -241,7 +246,10 @@ async def run_agent_tool(
         raise RuntimeError("tool agent checkpoint is incomplete")
     state = await load_graph_state(agent_name, checkpoint.state)
     state.message_history = await load_message_history(agent_name, checkpoint.message_history)
-    node = await load_node(agent_name, checkpoint.node)
+    node = bind_node_to_history(
+        await load_node(agent_name, checkpoint.node),
+        state.message_history,
+    )
     assert isinstance(node, _agent_graph.CallToolsNode)
     call = load_tool_call(tool_call.call)
 
@@ -258,11 +266,18 @@ async def run_agent_tool(
         try:
             value = await agent_run.ctx.deps.tool_manager.handle_call(call, metadata=metadata)
         except ToolRetryError as error:
+            # NOTE: Newer Pydantic AI releases carry retries as `ToolReturnPart` or
+            # `RetryFeedbackPart`, whose content is not narrowed to retry feedback.
+            retry_content: object = error.tool_retry.content
             return {
                 "kind": "retry_prompt",
                 "tool_call_id": call.tool_call_id,
                 "tool_name": call.tool_name,
-                "content": error.tool_retry.content,
+                "content": (
+                    cast(str | list[ErrorDetails], retry_content)
+                    if isinstance(retry_content, (str, list))
+                    else str(retry_content)
+                ),
             }
         except ToolFailedError as error:
             return {
