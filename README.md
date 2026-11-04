@@ -1,41 +1,22 @@
 # pydantic-ai-waymark
 
-AI agents are outgrowing the request-response cycle. They increasingly run for
-days, weeks, or months. Some of that is active work, but much of it is waiting:
-for a user to approve an action, for another system to respond, or for a
-two-week onboarding period to end. An agent should not have to stay in memory
-and occupy a worker through those gaps. Over that lifetime, workers will
-restart, code will be deployed, and temporary failures will happen.
+`pydantic-ai-waymark` runs Pydantic AI agents as durable
+[Waymark](https://github.com/piercefreeman/waymark) workflows. Waymark saves progress
+at model and tool action boundaries so a run can resume after a worker restarts.
+Durable timers let an agent wait without keeping a worker occupied.
 
-Saving the current step in a database is easy. The harder part is making the
-whole control loop reliable: recording which model and tool actions completed,
-applying retries and timeouts at the right boundaries, scheduling durable
-timers, and resuming the right run after a restart. Queues, schedulers, and
-state tables can solve each piece, but stitching them together becomes an
-orchestration system embedded in every agent.
-
-This is what durable execution provides. [Waymark](https://github.com/piercefreeman/waymark)
-compiles ordinary Python control flow into a durable state machine, checkpoints
-progress at action boundaries, and stores waits instead of holding a live
-process. Workers can come and go while the workflow continues from its last
-completed step.
-
-Waymark solves that problem for general Python workflows. `pydantic-ai-waymark`
-applies it to Pydantic AI agents: keep the model, tools, retries, timeouts, and
-low-level control you already have while Waymark handles persistence, wakeups,
-and scalable orchestration. It is more infrastructure than a short, one-shot
-agent needs; it earns its keep when the agent must outlive the process running
-it.
+You define agents and tools with Pydantic AI; Waymark handles persistence and
+scheduling through PostgreSQL and a pool of workers.
 
 ## Install
 
-Add the package to your project from PyPI:
+Requires Python 3.12 or later.
 
 ```bash
 uv add pydantic-ai-waymark
 ```
 
-Include the OpenAI provider used by the example with the `openai` extra:
+For the OpenAI examples below, include the provider extra:
 
 ```bash
 uv add "pydantic-ai-waymark[openai]"
@@ -43,14 +24,13 @@ uv add "pydantic-ai-waymark[openai]"
 
 ## Define an agent
 
-This library wraps your existing Pydantic AI agents, so define agents and tools
-as you normally would. The only change is to wrap the completed `Agent(...)`
-initialization in `waymark_agent(...)`:
+Register the agent with `waymark_agent` at module scope, then add its tools.
+Save these definitions in an importable module, such as `support_workflow.py`:
 
 ```python
 from pydantic import BaseModel
 from pydantic_ai import Agent
-from pydantic_ai_waymark import AIRequestBase, waymark_agent
+from pydantic_ai_waymark import waymark_agent
 
 
 class Reply(BaseModel):
@@ -75,10 +55,10 @@ def lookup_policy(topic: str) -> str:
     return f"Policy for {topic}: escalate account changes."
 ```
 
-## Compile the agent into a workflow
+## Run the agent in a workflow
 
-Parameterize `PydanticAIWorkflow` with the request type, implement the Waymark
-entrypoint, and call `run_agent` from it:
+Add a request type and a workflow to the same module. `run_agent` returns an
+`AgentResult`; its `output` contains the agent's answer.
 
 ```python
 from waymark import workflow
@@ -92,111 +72,139 @@ class SupportRequest(AIRequestBase[None]):
 @workflow
 class SupportWorkflow(PydanticAIWorkflow[SupportRequest]):
     async def run(self, request: SupportRequest) -> Reply:
-        return (await self.run_agent(request)).output
-
-
-reply = await SupportWorkflow().run(
-    SupportRequest(prompt="How do I update my account?")
-)
+        result = await self.run_agent(request)
+        return result.output
 ```
 
-The request parameter may be a union such as
-`PydanticAIWorkflow[SupportRequest | SalesRequest]`. This simply acts as a typehint
-for the run_agent function. You can similarly nest these values within a large request blob:
+`AIRequestBase` accepts a JSON-encoded `message_history`, per-run `deps`, a `model`
+override, `conversation_id`, and `run_id`. It records the agent's module reference
+so workers can load it.
+
+### Start workers
+
+Start PostgreSQL and create a database first, or use the
+[Docker Compose example](#docker-compose-example) below.
+
+Set `WAYMARK_DATABASE_URL` to your PostgreSQL database and `WAYMARK_USER_MODULE`
+to the module containing your agents and workflows. Each worker must be able to
+import that module. Run this from the project directory:
+
+```bash
+export WAYMARK_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/waymark
+export WAYMARK_USER_MODULE=support_workflow
+export OPENAI_API_KEY=...
+uv run waymark-start-workers
+```
+
+With workers running, call the workflow from an async function in your application:
 
 ```python
-class Agent1Request(APIRequestBase[None]):
-    agent = agent_1
+from support_workflow import SupportRequest, SupportWorkflow
 
-class Agent2Request(APIRequestBase[None]):
-    agent = agent_2
 
-class MainRequest(BaseModel):
-    request_1: Agent1Request
-    request_2: Agent2Request
+async def answer_question() -> str:
+    reply = await SupportWorkflow().run(
+        SupportRequest(prompt="How do I update my account?")
+    )
+    return reply.answer
+```
 
-@workflow
-class MultiAgentWorkflow(PydanticAIWorkflow[Agent1Request | Agent2Request]):
-    async def run(self, request: MainRequest) -> None:
-        response_1 = await self.run_agent(request.request_1)
-        response_2 = await self.run_agent(request.request_2)
+The application needs the same `WAYMARK_DATABASE_URL`. The call waits for the
+workflow to finish.
 
-reply = await MultiAgentWorkflow().run(
-    MainRequest(
-        request_1=SupportRequest(prompt="What's your name?")
-        request_2=SupportRequest(prompt="What's your name?")
+## Docker Compose example
+
+The repository includes a Docker Compose setup with PostgreSQL, Waymark workers,
+the Waymark dashboard, and a FastAPI form.
+
+From the repository root, copy the environment file:
+
+```bash
+cp .env.example .env
+```
+
+Set `OPENAI_API_KEY` in `.env`, then start the stack:
+
+```bash
+docker compose -f examples/docker-compose.yml up --build
+```
+
+Open [http://localhost:8000](http://localhost:8000) for the forms and
+[http://localhost:24119](http://localhost:24119) for the dashboard.
+
+The support form calls three tools. The sleep form lets you choose how long the
+agent waits before it resumes.
+
+Stop the stack and delete its example database with:
+
+```bash
+docker compose -f examples/docker-compose.yml down -v
+```
+
+## Multiple agents
+
+The type parameter on `PydanticAIWorkflow` declares which request types
+`run_agent` accepts. The workflow's input can contain several of those requests.
+Add a second agent and a combined request to the module above:
+
+```python
+review_agent = waymark_agent(
+    Agent(
+        "openai:gpt-5.2",
+        name="review_agent",
+        instructions="Review the support question for risks that need human attention.",
+        defer_model_check=True,
     )
 )
+
+
+class ReviewRequest(AIRequestBase[None]):
+    agent = review_agent
+
+
+class SupportReviewRequest(BaseModel):
+    support: SupportRequest
+    review: ReviewRequest
+
+
+@workflow
+class SupportReviewWorkflow(PydanticAIWorkflow[SupportRequest | ReviewRequest]):
+    async def run(self, request: SupportReviewRequest) -> tuple[Reply, str]:
+        support = await self.run_agent(request.support)
+        review = await self.run_agent(request.review)
+        return support.output, review.output
 ```
 
-`AIRequestBase` also accepts `message_history`, `deps`, `model`,
-`conversation_id`, and `run_id`. Its serialized representation includes the stable
-agent reference needed by the worker.
-
-## Durable payload codecs
-
-Large tool values such as images should not be copied into every Waymark snapshot.
-Register a serializer/deserializer pair to replace them with a small durable reference
-before an action result, graph state, or message history is persisted:
+From an async function, pass each agent its own request:
 
 ```python
-from mountaineer_di import Depends
-from pydantic_ai_waymark import Payload, SerializedPayload
-
-
-async def serialize_payload(
-    payload: Payload,
-    db=Depends(get_db_connection),
-) -> SerializedPayload:
-    value = await replace_large_values_with_database_refs(db, payload.to_python())
-    return payload.serialized(value)
-
-
-async def deserialize_payload(
-    payload: SerializedPayload,
-    db=Depends(get_db_connection),
-) -> Payload:
-    value = await restore_database_refs(db, payload.value)
-    return payload.deserialized(value)
-
-
-support_agent = waymark_agent(
-    Agent(..., name="support_agent"),
-    serializer=serialize_payload,
-    deserializer=deserialize_payload,
+from support_workflow import (
+    Reply,
+    ReviewRequest,
+    SupportRequest,
+    SupportReviewRequest,
+    SupportReviewWorkflow,
 )
+
+
+async def answer_and_review(question: str) -> tuple[Reply, str]:
+    return await SupportReviewWorkflow().run(
+        SupportReviewRequest(
+            support=SupportRequest(prompt=question),
+            review=ReviewRequest(prompt=question),
+        )
+    )
 ```
 
-`Payload` is a discriminated union covering graph state, messages, agent output, tool
-output, tool action results, deferred tool results, and user prompts. Match on
-`payload.kind` when a context needs special handling. `payload.to_python()` produces
-the plain-Python tree to transform; `serialized(...)` and `deserialized(...)` preserve
-and validate its kind across the round trip. Codecs may declare additional
-`mountaineer_di.Depends(...)` parameters. Sync and async codecs are supported, and
-generator dependencies remain open for the call and are cleaned up afterward.
+These calls run in order. See
+[`ParallelSupportWorkflow`](examples/support_agent.py) for a version that runs
+support and review concurrently.
 
-The workflow keeps one current checkpoint and stores message history as ordered deltas.
-Pending model-action results contain only the messages added by that action, preventing
-Waymark's retained action results from accumulating successively larger history copies.
-Graph-state payloads therefore exclude message history; `messages` payloads are
-reassembled before each agent step. Use stable keys or upserts when storing large values
-so repeated serialization reuses the same durable reference.
+## Tool execution
 
-Waymark actions use the same dependency resolver, so application I/O can use the same
-providers without putting database or storage clients in Pydantic AI's per-run `deps`:
+### Retries and timeouts
 
-```python
-from waymark import action
-
-
-@action
-async def save_result(result: dict, db = Depends(get_db_connection)) -> None:
-    await db.insert(result)
-```
-
-## Extras
-
-We make our best effort to wrap `pydantic-ai`'s features 1:1 - just with the addition of the magic of durable execution. For instance, you can use Pydantic AI's existing retry and timeout settings as usual:
+To set retries and a timeout, replace the earlier `lookup_policy` definition:
 
 ```python
 @support_agent.tool_plain(
@@ -208,7 +216,12 @@ def lookup_policy(topic: str) -> str:
 ```
 
 Timeouts and `ModelRetry` responses follow Pydantic AI's retry flow across
-durable Waymark actions. Other exceptions fail the workflow immediately.
+Waymark actions. Unhandled tool exceptions fail the workflow. Transient
+model-provider failures use the request's `model_retry` backoff settings.
+
+Tools that require approval currently stop the workflow with an error.
+
+### Sequential tools
 
 Tools run in parallel by default. Mark a tool as sequential when it must run
 alone:
@@ -240,9 +253,11 @@ Waymark resolves them as follows:
 Calls after the barrier can run in parallel again until the next sequential
 tool call.
 
-To let a tool request a durable wait, raise `DurableSleep`. The tool action
-records the request, the workflow performs the timer, and the supplied result
-is returned to the model under the original tool-call ID:
+### Durable waits
+
+Raise `DurableSleep` to wait before returning a tool result. Waymark stores the
+timer; when it expires, the supplied result goes back to the model under the
+original tool-call ID:
 
 ```python
 from pydantic_ai_waymark import DurableSleep
@@ -253,42 +268,14 @@ def wait_for_follow_up(seconds: float = 5) -> str:
     raise DurableSleep(seconds, result="Follow-up wait completed.")
 ```
 
-## Docker Compose example
-
-The example includes Postgres, Waymark workers, the Waymark dashboard, and a
-small FastAPI form. Put the OpenAI key in the repository's `.env` file and run:
-
-```bash
-cp .env.example .env
-docker compose -f examples/docker-compose.yml up --build
-```
-
-Open [http://localhost:8000](http://localhost:8000). The Waymark dashboard is at
-[http://localhost:24119](http://localhost:24119).
-
-The support form calls three action tools without sleeping. A separate sleep
-form passes a configurable duration through the agent's dependencies and
-visibly exercises a `DurableSleep` timer before the model resumes.
-
-Stop the stack and remove its example database with:
-
-```bash
-docker compose -f examples/docker-compose.yml down -v
-```
-
 ## Lifecycle hooks
 
-Sometimes you want to keep users informed about an agent's progress. The easiest
-way to do that is to register hooks for state changes, such as when an agent receives
-a tool call and when that tool finishes. This mirrors agent harnesses like Codex and
-Claude Code, which show the currently running tool in shimmering text beneath the
-conversation history.
+Override `on_agent_start`, `on_agent_end`, `on_message`, `on_tool_start`, or
+`on_tool_end` to report progress. Put database writes and network calls in
+Waymark actions so their results are persisted.
 
-Use these hooks to save the current state to a database for polling, or push updates
-through a websocket service for broadcast, as shown below. `PydanticAIWorkflow`
-provides no-op `on_agent_start`, `on_agent_end`, `on_message`, `on_tool_start`, and
-`on_tool_end` methods. Override only the hooks you need, and put external I/O in a
-Waymark action so the side effect remains durable:
+This example publishes tool-start events through an application-provided
+`websocket_service`:
 
 ```python
 from typing import Any
@@ -303,18 +290,6 @@ async def publish_event(event: str, payload: dict[str, Any]) -> None:
 
 @workflow
 class ObservableSupportWorkflow(PydanticAIWorkflow[SupportRequest]):
-    async def on_message(
-        self,
-        agent_request: SupportRequest,
-        message: str,
-    ) -> None:
-        await self.run_action(
-            publish_event(
-                event="message.received",
-                payload={"message": message},
-            )
-        )
-
     async def on_tool_start(
         self,
         agent_request: SupportRequest,
@@ -328,35 +303,79 @@ class ObservableSupportWorkflow(PydanticAIWorkflow[SupportRequest]):
             )
         )
 
-    async def on_tool_end(
-        self,
-        agent_request: SupportRequest,
-        tool_id: str,
-        payload: object,
-    ) -> None:
-        await self.run_action(
-            publish_event(
-                event="tool.ended",
-                payload={"tool_id": tool_id, "result": payload},
-            )
-        )
-
     async def run(self, request: SupportRequest) -> Reply:
-        return (await self.run_agent(request)).output
+        result = await self.run_agent(request)
+        return result.output
 ```
 
-The end-hook payloads are the complete `AgentResult` and tool-result dictionary.
-Use `tool_id` as an idempotency key when the receiving service may see retries.
+`on_message` receives each plain-text model message. `on_agent_end` receives the
+complete `AgentResult`; `on_tool_end` receives a tool-result dictionary. If the
+receiver may see retries, deduplicate tool events by run, event name, and `tool_id`.
 
-## Workers
+## Payload codecs
 
-The module containing registered agents must be importable by each worker:
+Use payload codecs to store large values, such as images, outside Waymark
+snapshots. Register a serializer and deserializer together to replace those values
+with references when saving and restore them when loading.
 
-```bash
-export WAYMARK_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/waymark
-export WAYMARK_USER_MODULE=examples.support_agent
-export OPENAI_API_KEY=...
-uv run waymark-start-workers
+The database connection and reference-storage helpers below are application code:
+
+```python
+from mountaineer_di import Depends
+from pydantic_ai_waymark import Payload, SerializedPayload
+
+
+async def serialize_payload(
+    payload: Payload,
+    db=Depends(get_db_connection),
+) -> SerializedPayload:
+    value = await replace_large_values_with_database_refs(db, payload.to_python())
+    return payload.serialized(value)
+
+
+async def deserialize_payload(
+    payload: SerializedPayload,
+    db=Depends(get_db_connection),
+) -> Payload:
+    value = await restore_database_refs(db, payload.value)
+    return payload.deserialized(value)
+
+
+support_agent = waymark_agent(
+    support_agent,
+    serializer=serialize_payload,
+    deserializer=deserialize_payload,
+)
+```
+
+`Payload` covers graph state, messages, agent output, tool output, tool action
+results, deferred tool results, and user prompts. Use `payload.kind` to handle
+these types separately. `payload.to_python()` gives you the Python tree to
+transform; `serialized(...)` and `deserialized(...)` preserve and validate its
+kind across the round trip.
+
+Codecs can be sync or async and can declare `mountaineer_di.Depends(...)`
+parameters. Generator dependencies stay open for the call and are cleaned up
+afterward.
+
+The workflow keeps one current checkpoint. Intermediate model-action results
+store only new messages, avoiding growing copies of the full history. Graph-state
+payloads exclude message history; `messages` payloads are reassembled before each
+agent step. The final result includes the complete history.
+
+Use stable keys or upserts when storing large values so repeated serialization
+reuses the same reference.
+
+Waymark actions also accept dependency providers. Use them to inject database or
+storage clients without adding those clients to Pydantic AI's per-run `deps`:
+
+```python
+from waymark import action
+
+
+@action
+async def save_result(result: dict, db=Depends(get_db_connection)) -> None:
+    await db.insert(result)
 ```
 
 ## Checks
