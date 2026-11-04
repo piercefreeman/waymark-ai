@@ -9,7 +9,7 @@ import pytest
 from mountaineer_di import Depends
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ValidationError
-from pydantic_ai import Agent, BinaryContent, ModelMessagesTypeAdapter, RunContext
+from pydantic_ai import Agent, BinaryContent, ModelMessagesTypeAdapter, RunContext, Tool
 from pydantic_ai.exceptions import ModelAPIError, ModelRetry
 from pydantic_ai.messages import BinaryImage, ToolReturn
 from pydantic_ai.models.openai import OpenAIChatModel
@@ -160,7 +160,7 @@ toolset_agent = waymark_agent(
         TestModel(call_tools=["toolset_lookup"]),
         name="toolset_agent",
         retries=2,
-        toolsets=[FunctionToolset([toolset_lookup])],
+        toolsets=[FunctionToolset([Tool(toolset_lookup)])],
     )
 )
 tool_calls: list[str] = []
