@@ -153,14 +153,17 @@ PendingTransition: TypeAlias = NodeTransition | ToolsTransition
 AgentTransition: TypeAlias = PendingTransition | DoneTransition
 
 
-class AgentCheckpoint(WireModel):
+# NOTE: Built inside compiled workflow code, so Waymark requires a plain model: no custom
+# config (unlike `WireModel`) and literal defaults instead of factories. Pydantic copies
+# mutable defaults per instance.
+class AgentCheckpoint(BaseModel):
     """Only the state needed to execute the agent's next durable step."""
 
     state: str | None = None
     node: AgentNodePayload | None = None
     deps_state: DepsState | None = None
-    tool_metadata: ToolMetadata = Field(default_factory=dict)
-    message_history: list[str] = Field(default_factory=list)
+    tool_metadata: ToolMetadata = {}
+    message_history: list[str] = []
 
 
 class ToolResultBase(TypedDict):

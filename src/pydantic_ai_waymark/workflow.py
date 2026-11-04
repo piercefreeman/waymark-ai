@@ -1,5 +1,6 @@
 import asyncio
-from typing import Any, Generic, TypeVar
+import types
+from typing import Any, Generic, TypeVar, get_args, get_origin
 
 from waymark import Workflow
 
@@ -7,7 +8,6 @@ from .actions import (
     RetryableAgentError,
     raise_approval_required,
     raise_model_attempts_exhausted,
-    resolve_parallel_tool_results,
     run_agent_node,
     run_agent_tool,
 )
@@ -29,6 +29,10 @@ AIRequestT = TypeVar("AIRequestT", bound=AIRequestBase[Any])
 class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
     """Workflow base that compiles Pydantic AI graph and tool transitions to actions."""
 
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        _specialize_request_helpers(cls)
+
     # Public
 
     async def run_agent(
@@ -44,7 +48,7 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
         tool_results: list[ToolActionResult] = []
         message_history: list[str] = []
         if request.message_history is not None:
-            message_history.append(request.message_history)
+            message_history = [request.message_history]
         checkpoint = AgentCheckpoint(message_history=message_history)
         transition: AgentTransition | None = None
         while True:
@@ -62,7 +66,9 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
                 return result
             message_history = checkpoint.message_history
             if transition.history_delta is not None:
-                message_history.append(transition.history_delta)
+                # NOTE: Waymark only appends to fresh local lists, and this one aliases the
+                # previous checkpoint's history, so build the extended list instead.
+                message_history = message_history + [transition.history_delta]
             messages = transition.messages
             approvals = transition.approvals
             tool_calls = transition.tool_calls
@@ -197,6 +203,10 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
         ``run_agent`` calls this after approval handling; ordinary calls run in
         parallel segments while calls marked sequential run alone between segments.
         """
+        # NOTE: Waymark only appends to lists never passed to a call, and each batch is
+        # passed to a segment, so the lists here grow by concatenation instead.
+        # NOTE: Waymark only appends to lists never passed to a call, and each batch is
+        # passed to a segment, so the lists here grow by concatenation instead.
         results: list[ToolActionResult] = []
         parallel_calls: list[ToolCall] = []
         for tool_call in tool_calls:
@@ -207,20 +217,23 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
                         checkpoint,
                         parallel_calls,
                     )
-                    for parallel_result in parallel_results:
-                        results.append(parallel_result)
+                    results = results + parallel_results
                     parallel_calls = []
-                results.append(await self._run_agent_tool_call(request, checkpoint, tool_call))
+                sequential_result = await self._run_agent_tool_call(
+                    request,
+                    checkpoint,
+                    tool_call,
+                )
+                results = results + [sequential_result]
             else:
-                parallel_calls.append(tool_call)
+                parallel_calls = parallel_calls + [tool_call]
         if parallel_calls:
             parallel_results = await self._run_agent_tool_segment(
                 request,
                 checkpoint,
                 parallel_calls,
             )
-            for parallel_result in parallel_results:
-                results.append(parallel_result)
+            results = results + parallel_results
         return results
 
     async def _run_agent_tool_segment(
@@ -237,14 +250,9 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
         if len(tool_calls) == 1:
             result = await self._run_agent_tool_call(request, checkpoint, tool_calls[0])
             return [result]
-        gathered: list[object] = await asyncio.gather(
-            *[
-                self._run_agent_tool_call(request, checkpoint, tool_call)
-                for tool_call in tool_calls
-            ],
-            return_exceptions=True,
+        results: list[ToolActionResult] = await asyncio.gather(
+            *[self._run_agent_tool_call(request, checkpoint, tool_call) for tool_call in tool_calls]
         )
-        results = await resolve_parallel_tool_results(gathered)
         return results
 
     async def _run_agent_tool_call(
@@ -287,3 +295,57 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
             result = action_result
         await self.on_tool_end(request, tool_call.call.tool_call_id, result)
         return result
+
+
+def _specialized_request_type(workflow_cls: type) -> object | None:
+    """Return the request type a subclass fills ``AIRequestT`` with, if it is concrete."""
+    for base in types.get_original_bases(workflow_cls):
+        origin = get_origin(base)
+        if isinstance(origin, type) and issubclass(origin, PydanticAIWorkflow):
+            arguments = get_args(base)
+            if len(arguments) != 1:
+                return None
+            request_type = arguments[0]
+            if isinstance(request_type, TypeVar) or any(
+                isinstance(argument, TypeVar) for argument in get_args(request_type)
+            ):
+                return None
+            return request_type
+    return None
+
+
+def _specialize_request_helpers(workflow_cls: type) -> None:
+    """Give a specialized subclass its own copies of the request-typed base helpers.
+
+    Waymark compiles each ``self.<helper>()`` it reaches from the source of the method as
+    written, resolving annotations in that function's globals. On this base class those
+    still name the open ``AIRequestT``, which Waymark rejects; it does not apply the
+    subclass's ``PydanticAIWorkflow[SomeRequest]`` specialization. Each copy shares the
+    original code but resolves ``AIRequestT`` to the subclass's request type, so the
+    compiled workflow is closed while type checkers keep the generic signatures.
+    """
+    request_type = _specialized_request_type(workflow_cls)
+    if request_type is None:
+        return
+    for name, helper in vars(PydanticAIWorkflow).items():
+        if not isinstance(helper, types.FunctionType) or getattr(workflow_cls, name) is not helper:
+            continue
+        annotations = helper.__annotations__
+        if not any(annotation is AIRequestT for annotation in annotations.values()):
+            continue
+        specialized = types.FunctionType(
+            helper.__code__,
+            {**helper.__globals__, "AIRequestT": request_type},
+            helper.__name__,
+            helper.__defaults__,
+            helper.__closure__,
+        )
+        specialized.__kwdefaults__ = helper.__kwdefaults__
+        specialized.__qualname__ = f"{workflow_cls.__qualname__}.{name}"
+        specialized.__module__ = helper.__module__
+        specialized.__doc__ = helper.__doc__
+        specialized.__annotations__ = {
+            key: request_type if annotation is AIRequestT else annotation
+            for key, annotation in annotations.items()
+        }
+        setattr(workflow_cls, name, specialized)

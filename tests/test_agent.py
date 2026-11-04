@@ -5,7 +5,7 @@ import importlib
 import json
 from collections import deque
 from collections.abc import Iterator
-from typing import Annotated, Any, get_type_hints
+from typing import Annotated, Any, Generic, TypeVar, get_type_hints
 
 import openai
 import pytest
@@ -20,7 +20,8 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.toolsets import FunctionToolset
 from waymark import action, bridge, workflow
-from waymark.actions import serialize_result_payload
+from waymark.actions import serialize_returned_value
+from waymark.exceptions import WorkflowFailedError
 
 from pydantic_ai_waymark import (
     AgentCheckpoint,
@@ -394,19 +395,22 @@ async def record_hook(
 @workflow
 class AgentWorkflow(PydanticAIWorkflow[AgentRequest]):
     async def run(self, request: AgentRequest) -> Answer:
-        return (await self.run_agent(request)).output
+        result = await self.run_agent(request)
+        return result.output
 
 
 @workflow
 class ToolWorkflow(PydanticAIWorkflow[ToolRequest]):
     async def run(self, request: ToolRequest) -> str:
-        return (await self.run_agent(request)).output
+        result = await self.run_agent(request)
+        return result.output
 
 
 @workflow
 class ToolsetWorkflow(PydanticAIWorkflow[ToolsetRequest]):
     async def run(self, request: ToolsetRequest) -> str:
-        return (await self.run_agent(request)).output
+        result = await self.run_agent(request)
+        return result.output
 
 
 @workflow
@@ -461,25 +465,29 @@ class HookWorkflow(PydanticAIWorkflow[ToolRequest]):
         )
 
     async def run(self, request: ToolRequest) -> str:
-        return (await self.run_agent(request)).output
+        result = await self.run_agent(request)
+        return result.output
 
 
 @workflow
 class TestSleepWorkflow(PydanticAIWorkflow[SleepRequest]):
     async def run(self, request: SleepRequest) -> str:
-        return (await self.run_agent(request)).output
+        result = await self.run_agent(request)
+        return result.output
 
 
 @workflow
 class DependencyWorkflow(PydanticAIWorkflow[DependencyRequest]):
     async def run(self, request: DependencyRequest) -> str:
-        return (await self.run_agent(request)).output
+        result = await self.run_agent(request)
+        return result.output
 
 
 @workflow
 class ParallelWorkflow(PydanticAIWorkflow[ParallelRequest]):
     async def run(self, request: ParallelRequest) -> str:
-        return (await self.run_agent(request)).output
+        result = await self.run_agent(request)
+        return result.output
 
 
 @workflow
@@ -491,19 +499,36 @@ class HttpWorkflow(PydanticAIWorkflow[HttpRequest]):
 @workflow
 class ApprovalWorkflow(PydanticAIWorkflow[ApprovalRequest]):
     async def run(self, request: ApprovalRequest) -> str:
-        return (await self.run_agent(request)).output
+        result = await self.run_agent(request)
+        return result.output
 
 
 @workflow
 class TimeoutWorkflow(PydanticAIWorkflow[TimeoutRequest]):
     async def run(self, request: TimeoutRequest) -> str:
-        return (await self.run_agent(request)).output
+        result = await self.run_agent(request)
+        return result.output
 
 
 @workflow
 class UnionWorkflow(PydanticAIWorkflow[AgentRequest | ToolRequest]):
     async def run(self, request: AgentRequest | ToolRequest) -> Answer | str:
-        return (await self.run_agent(request)).output
+        result = await self.run_agent(request)
+        return result.output
+
+
+IntermediateRequestT = TypeVar("IntermediateRequestT", bound=AIRequestBase[Any])
+
+
+class IntermediateWorkflow(PydanticAIWorkflow[IntermediateRequestT], Generic[IntermediateRequestT]):
+    """Generic layer that a library built on this package might add."""
+
+
+@workflow
+class SpecializedThroughIntermediateWorkflow(IntermediateWorkflow[ToolRequest]):
+    async def run(self, request: ToolRequest) -> str:
+        result = await self.run_agent(request)
+        return result.output
 
 
 OPENAI_RESPONSE = {
@@ -684,7 +709,7 @@ def test_permanent_planning_failure_is_not_retried() -> None:
     planning_failures[0] = 1
     planning_failure_kind[0] = "permanent"
 
-    with pytest.raises(RuntimeError, match="transient planning failure"):
+    with pytest.raises(WorkflowFailedError, match="transient planning failure"):
         asyncio.run(AgentWorkflow().run(AgentRequest(prompt="answer this")))
 
     assert planning_calls == ["called"]
@@ -700,7 +725,7 @@ def test_model_retry_attempts_and_backoff_are_bounded() -> None:
         max_seconds=5,
     )
 
-    with pytest.raises(RuntimeError, match="failed after 2 transient attempts"):
+    with pytest.raises(WorkflowFailedError, match="failed after 2 transient attempts"):
         asyncio.run(
             AgentWorkflow().run(
                 AgentRequest(
@@ -768,7 +793,7 @@ def test_permanent_openai_http_errors_fail_without_adapter_retry(
         json={"error": {"message": "permanent", "type": "invalid_request_error"}},
     )
 
-    with pytest.raises(RuntimeError, match=rf"status_code: {status_code}"):
+    with pytest.raises(WorkflowFailedError, match=rf"status_code: {status_code}"):
         asyncio.run(HttpWorkflow().run(HttpRequest(prompt="answer this")))
 
     assert len(openai_mock.requests) == 1
@@ -807,7 +832,7 @@ def test_retryable_openai_errors_stop_at_configured_attempts(
             status_code=429, json={"error": {"message": "rate limited", "type": "rate_limit_error"}}
         )
 
-    with pytest.raises(RuntimeError, match="failed after 2 transient attempts"):
+    with pytest.raises(WorkflowFailedError, match="failed after 2 transient attempts"):
         asyncio.run(
             HttpWorkflow().run(
                 HttpRequest(
@@ -912,9 +937,7 @@ def test_model_action_state_grows_linearly_with_message_history(monkeypatch) -> 
     async def record_action_result(dispatch):
         result = await execute_action(dispatch)
         if dispatch.action_name == "pydantic_ai_agent_node" and result.exception is None:
-            node_result_sizes.append(
-                len(serialize_result_payload(result.result).SerializeToString())
-            )
+            node_result_sizes.append(len(serialize_returned_value(result.result)))
         return result
 
     monkeypatch.setattr(bridge, "execute_action", record_action_result)
@@ -927,21 +950,21 @@ def test_unhandled_tool_exception_fails_without_retry() -> None:
     tool_failures[0] = 1
     tool_failure_kind[0] = "error"
 
-    with pytest.raises(RuntimeError, match="permanent lookup failure"):
+    with pytest.raises(WorkflowFailedError, match="permanent lookup failure"):
         asyncio.run(ToolWorkflow().run(ToolRequest(prompt="answer this")))
 
     assert tool_calls == ["a"]
 
 
 def test_approval_required_tool_stops_before_its_body_runs() -> None:
-    with pytest.raises(RuntimeError, match="requested human approval"):
+    with pytest.raises(WorkflowFailedError, match="requested human approval"):
         asyncio.run(ApprovalWorkflow().run(ApprovalRequest(prompt="delete it")))
 
     assert approval_calls == []
 
 
 def test_pydantic_tool_timeout_uses_its_retry_budget() -> None:
-    with pytest.raises(RuntimeError, match="exceeded max retries count of 1"):
+    with pytest.raises(WorkflowFailedError, match="exceeded max retries count of 1"):
         asyncio.run(TimeoutWorkflow().run(TimeoutRequest(prompt="run the tool")))
 
     assert timeout_calls == ["called", "called"]
@@ -963,6 +986,21 @@ def test_tool_can_request_a_durable_workflow_sleep() -> None:
 def test_durable_sleep_rejects_invalid_durations(seconds: float) -> None:
     with pytest.raises(ValueError, match="finite and non-negative"):
         DurableSleep(seconds)
+
+
+def test_generic_helpers_compile_for_specialized_subclasses() -> None:
+    # Waymark rejects open type parameters, so each specialized subclass gets helper
+    # copies whose request annotation resolves to its own request type.
+    assert ToolWorkflow.run_agent is not PydanticAIWorkflow.run_agent
+    assert get_type_hints(ToolWorkflow.run_agent)["request"] is ToolRequest
+    assert get_type_hints(ToolWorkflow.on_agent_start)["agent_request"] is ToolRequest
+    assert IntermediateWorkflow.run_agent is PydanticAIWorkflow.run_agent
+
+    result = asyncio.run(
+        SpecializedThroughIntermediateWorkflow().run(ToolRequest(prompt="answer this"))
+    )
+
+    assert result == '{"lookup":"found"}'
 
 
 def test_tools_parallelize_around_sequential_barriers() -> None:
@@ -1013,7 +1051,7 @@ def test_backoff_config_rejects_unsafe_values(field: str, value: float) -> None:
 
 
 def test_invalid_message_history_fails_without_retrying_the_model() -> None:
-    with pytest.raises(RuntimeError, match="Invalid JSON"):
+    with pytest.raises(WorkflowFailedError, match="Invalid JSON"):
         asyncio.run(
             AgentWorkflow().run(
                 AgentRequest(

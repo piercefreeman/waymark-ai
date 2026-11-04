@@ -177,18 +177,6 @@ wheels = [
 ]
 
 [[package]]
-name = "googleapis-common-protos"
-version = "1.75.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "protobuf" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/b5/c8/f439cffde755cffa462bfbb156278fa6f9d09119719af9814b858fd4f81f/googleapis_common_protos-1.75.0.tar.gz", hash = "sha256:53a062ff3c32552fbd62c11fe23768b78e4ddf0494d5e5fd97d3f4689c75fbbd", size = 151035, upload-time = "2026-05-07T08:04:49.423Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/e7/c8/e2645aa8ed02fd4c7a2f59d68783b65b1f3cbdfe39a6308e156509d1fee8/googleapis_common_protos-1.75.0-py3-none-any.whl", hash = "sha256:961ed60399c457ceb0ee8f285a84c870aabc9c6a832b9d37bb281b5bebde43ed", size = 300631, upload-time = "2026-05-07T08:03:30.345Z" },
-]
-
-[[package]]
 name = "griffelib"
 version = "2.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -560,7 +548,7 @@ requires-dist = [
     { name = "pydantic-ai-slim", specifier = ">=2.21,<3" },
     { name = "pydantic-ai-slim", extras = ["openai"], marker = "extra == 'openai'", specifier = ">=2.21,<3" },
     { name = "uvicorn", marker = "extra == 'web'", specifier = ">=0.35,<1" },
-    { name = "waymark", specifier = ">=0.30.0.dev7,<0.31" },
+    { name = "waymark", specifier = ">=0.30.0" },
 ]
 provides-extras = ["openai", "web"]
 
@@ -966,19 +954,19 @@ wheels = [
 
 [[package]]
 name = "waymark"
-version = "0.30.0.dev7"
+version = "0.30.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "googleapis-common-protos" },
     { name = "grpcio" },
     { name = "mountaineer-di" },
     { name = "protobuf" },
     { name = "pydantic" },
+    { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/34/9d/fbec3ba01c7b86e601e58d6a7c590733d5b81806c6702686b8285d7a1859/waymark-0.30.0.dev7.tar.gz", hash = "sha256:c37f651620fbb5656705942536245085808902d5c211e7a104bd08f88378fd49", size = 85666, upload-time = "2026-08-27T17:09:30.22Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/22/3a/18ed26146187c2b101013f709e41b8b07f1b2b4dcc77ab39dc0e07ddb91e/waymark-0.30.0.tar.gz", hash = "sha256:73153deba5654d0958e1367d247b15ed79930283aa2d59b1d4d6d57078bc199c", size = 117113, upload-time = "2026-11-04T00:02:48.83Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e3/40/ee634848813b9cad468e911969662982f9fe59db9ca7fc30749f219719f2/waymark-0.30.0.dev7-py3-none-macosx_11_0_arm64.whl", hash = "sha256:e57d2f6940a5be32a16c066241a2c4c6722c365085df56d09bec0d3a305925d2", size = 42881100, upload-time = "2026-08-27T17:09:16.577Z" },
-    { url = "https://files.pythonhosted.org/packages/2f/86/6f1c674abd01138823e3a944c54004c0b1a2d4ff70ea6d1cebfefd22ab69/waymark-0.30.0.dev7-py3-none-manylinux_2_39_aarch64.whl", hash = "sha256:1184a023359eeeeade1e6c02ef5aa9c509097778b4cc75fc80edf49f72283ed5", size = 23778649, upload-time = "2026-08-27T17:09:19.766Z" },
-    { url = "https://files.pythonhosted.org/packages/da/4d/64e56ed5888fb624d48cacd64fa3210ee8538b156d87d7ab2a0d0ce21eea/waymark-0.30.0.dev7-py3-none-manylinux_2_39_x86_64.whl", hash = "sha256:5ec4ce0b4291911d2adff3cd24b9c2d60672e323d8619194b9fc49a9a6726940", size = 23985186, upload-time = "2026-08-27T17:09:23.22Z" },
-    { url = "https://files.pythonhosted.org/packages/15/67/df162e9be88392996863ec71516e68b4f1f4c73d962f31a7bbafee2403d8/waymark-0.30.0.dev7-py3-none-win_amd64.whl", hash = "sha256:b7a1aaef3941e16f0fd5384b2d91d7a23581f2e6239308a36eaf0145ab076941", size = 38602038, upload-time = "2026-08-27T17:09:27.103Z" },
+    { url = "https://files.pythonhosted.org/packages/5f/0d/2d8d71469d348e7d7408bdefb98889a83ed7729b62aaf0eeeb647942556a/waymark-0.30.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:a8fe52fcc5060953e47ab4976671e3b2944778b543c6955095f14e7393d0a2da", size = 42702558, upload-time = "2026-11-04T00:02:38.212Z" },
+    { url = "https://files.pythonhosted.org/packages/27/4b/dcf32d72365246b14b9cf70089dc1ac012c3d316349b0bb956066d742430/waymark-0.30.0-py3-none-manylinux_2_39_aarch64.whl", hash = "sha256:58809be7fbee5e61f6b3c55c1b3e1b2a542164076ad5437f97b851a4772bf0f3", size = 24404481, upload-time = "2026-11-04T00:02:41.043Z" },
+    { url = "https://files.pythonhosted.org/packages/d4/7a/97c5e56fcebe4dc4fdc743ce066a48a0d395ce4cc8214a0368ce6c9edc37/waymark-0.30.0-py3-none-manylinux_2_39_x86_64.whl", hash = "sha256:ab1c53781099c28579c3e3511113abc7bec5a4c7996b683a81d697e6659d99fe", size = 24611563, upload-time = "2026-11-04T00:02:43.408Z" },
+    { url = "https://files.pythonhosted.org/packages/4e/32/76790154b6cd579399cd56866310909cee2785417815212f3f324f4f7d55/waymark-0.30.0-py3-none-win_amd64.whl", hash = "sha256:67bbfce52b804a40146fa04a4d10a2b74c99d7a24270251279ce3c4abbda9f1e", size = 37210624, upload-time = "2026-11-04T00:02:46.099Z" },
 ]

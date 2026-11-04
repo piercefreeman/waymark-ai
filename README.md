@@ -72,7 +72,8 @@ class SupportRequest(AIRequestBase[None]):
 @workflow
 class SupportWorkflow(PydanticAIWorkflow[SupportRequest]):
     async def run(self, request: SupportRequest) -> Reply:
-        return (await self.run_agent(request)).output
+        result = await self.run_agent(request)
+        return result.output
 ```
 
 `AIRequestBase` accepts a JSON-encoded `message_history`, per-run `deps`, a `model`
@@ -303,7 +304,8 @@ class ObservableSupportWorkflow(PydanticAIWorkflow[SupportRequest]):
         )
 
     async def run(self, request: SupportRequest) -> Reply:
-        return (await self.run_agent(request)).output
+        result = await self.run_agent(request)
+        return result.output
 ```
 
 `on_message` receives each plain-text model message. `on_agent_end` receives the
