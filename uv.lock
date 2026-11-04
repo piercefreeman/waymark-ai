@@ -555,7 +555,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", marker = "extra == 'web'", specifier = ">=0.116,<1" },
-    { name = "mountaineer-di", specifier = ">=0.2,<0.4" },
+    { name = "mountaineer-di", specifier = ">=0.2" },
     { name = "pydantic-ai-slim", specifier = ">=2.21,<3" },
     { name = "pydantic-ai-slim", extras = ["openai"], marker = "extra == 'openai'", specifier = ">=2.21,<3" },
     { name = "uvicorn", marker = "extra == 'web'", specifier = ">=0.35,<1" },
