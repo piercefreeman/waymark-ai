@@ -81,7 +81,7 @@ jobs:
         run: |
           {
             echo 'matrix<<EOF'
-            uv run scripts/pydantic_ai_version_matrix.py --minimum 2.21
+            uv run scripts/version_matrix.py --package pydantic-ai-slim --minimum 2.21
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
@@ -110,6 +110,61 @@ jobs:
           uv sync --frozen
           uv pip install "${{ matrix.package }}[openai]==${{ matrix.version }}"
           uv pip show ${{ matrix.package }} pydantic-graph openai
+
+      - name: Run tests
+        run: uv run --no-sync pytest
+
+  waymark-matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.generate.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Generate Waymark compatibility matrix
+        id: generate
+        run: |
+          {
+            echo 'matrix<<EOF'
+            uv run scripts/version_matrix.py --package waymark --minimum 0.30 --limit 5
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+  waymark-compat:
+    name: waymark ${{ matrix.label }}
+    needs: [waymark-matrix]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.waymark-matrix.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies with ${{ matrix.package }} ${{ matrix.version }}
+        run: |
+          uv sync --frozen
+          uv pip install "${{ matrix.package }}==${{ matrix.version }}"
+          uv pip show ${{ matrix.package }}
 
       - name: Run tests
         run: uv run --no-sync pytest
