@@ -291,6 +291,7 @@ async def restore_deps_state(
             _agent_graph.build_run_context(agent_run.ctx),
             run_step=tool_run_step,
             retries=value.tool_retries,
+            max_retries=deps.tool_manager.default_max_retries,
         )
         tool_manager = await deps.tool_manager.for_run_step(run_context)
         tool_manager.failed_tools.update(value.failed_tools)
