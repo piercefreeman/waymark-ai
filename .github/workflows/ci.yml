@@ -71,12 +71,17 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
       - name: Generate Pydantic AI compatibility matrix
         id: generate
         run: |
           {
             echo 'matrix<<EOF'
-            python scripts/pydantic_ai_version_matrix.py --minimum 2.21
+            uv run scripts/pydantic_ai_version_matrix.py --minimum 2.21
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 

@@ -544,6 +544,7 @@ web = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "click" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "pydantic-ai-slim", extra = ["openai"] },
@@ -565,6 +566,7 @@ provides-extras = ["openai", "web"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "click", specifier = ">=8.1" },
     { name = "fastapi", specifier = ">=0.116,<1" },
     { name = "httpx", specifier = ">=0.28,<1" },
     { name = "pydantic-ai-slim", extras = ["openai"], specifier = ">=2.21,<3" },
