@@ -85,6 +85,11 @@ class SerializedToolCall(WireModel):
 class ToolCall(WireModel):
     call: SerializedToolCall
     sequential: bool = False
+    #: The tool's own retry budget (`retries=` on the tool, or the agent's default),
+    #: as Pydantic AI resolved it. Also bounds how often the workflow reruns the
+    #: tool's action when Waymark loses it, so a worker restart is invisible to the
+    #: agent. Defaults to Pydantic AI's own default for checkpoints written before it.
+    max_retries: int = 1
 
 
 class ModelRequestNodePayload(WireModel):

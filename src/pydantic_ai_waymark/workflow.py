@@ -2,13 +2,14 @@ import asyncio
 import types
 from typing import Any, Generic, TypeVar, get_args, get_origin
 
-from waymark import Workflow
+from waymark import ActionExecutionLost, ActionExecutionNotStarted, Workflow
 
 from .actions import (
     RetryableAgentError,
     delegate_tool_result,
     raise_approval_required,
     raise_model_attempts_exhausted,
+    raise_tool_retries_exhausted,
     read_agent_messages,
     run_agent_node,
     run_agent_tool,
@@ -137,7 +138,9 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
 
         ``run_agent`` calls this initially and after every tool batch, passing the
         prior transition and results so the graph can return its next node or result.
-        Only ``RetryableAgentError`` uses the request's bounded retry configuration.
+        ``RetryableAgentError`` and a lost or never-started action (a worker restart)
+        use the request's bounded retry configuration: the node is replay-safe, so
+        rerunning it is invisible to the agent.
         """
         model_attempt = 0
         while True:
@@ -155,7 +158,7 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
                         run_id=request.run_id,
                     )
                 )
-            except RetryableAgentError:
+            except (RetryableAgentError, ActionExecutionLost, ActionExecutionNotStarted):
                 if model_attempt >= request.model_retry.attempts:
                     await raise_model_attempts_exhausted(model_attempt)
                 backoff_seconds = await self._model_retry_backoff_seconds(
@@ -277,16 +280,7 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
             tool_call.call.tool_call_id,
             tool_call.call.args,
         )
-        action_result = await self.run_action(
-            run_agent_tool(
-                request.agent_reference,
-                checkpoint,
-                tool_call,
-                deps=request.deps,
-                model=request.model,
-                prompt=request.prompt,
-            )
-        )
+        action_result = await self._run_agent_tool_action(request, checkpoint, tool_call)
 
         if action_result["kind"] == "sleep":
             sleep_seconds = action_result["seconds"]
@@ -306,6 +300,42 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
         await self.on_tool_end(request, tool_call.call.tool_call_id, result)
         return result
 
+    async def _run_agent_tool_action(
+        self,
+        request: AIRequestT,
+        checkpoint: AgentCheckpoint,
+        tool_call: ToolCall,
+    ) -> ToolActionResult:
+        """Run one tool call's action, rerunning it when Waymark loses it.
+
+        A plain Pydantic AI run has no notion of a worker dying, so the agent never
+        sees one: a lost or never-started attempt reruns the same call, with no retry
+        prompt. The tool's own retry budget (``retries=``, carried on ``tool_call``)
+        bounds it, counted apart from Pydantic AI's own ``ModelRetry`` attempts; past
+        it the run fails as Pydantic AI fails a tool that exceeds its retries. A lost
+        attempt may have finished, so a tool with side effects that must not repeat
+        sets ``retries=0``.
+        """
+        lost_attempts = 0
+        while True:
+            try:
+                return await self.run_action(
+                    run_agent_tool(
+                        request.agent_reference,
+                        checkpoint,
+                        tool_call,
+                        deps=request.deps,
+                        model=request.model,
+                        prompt=request.prompt,
+                    )
+                )
+            except (ActionExecutionLost, ActionExecutionNotStarted):
+                lost_attempts += 1
+                if lost_attempts > tool_call.max_retries:
+                    await raise_tool_retries_exhausted(
+                        tool_call.call.tool_name, tool_call.max_retries
+                    )
+
     async def _run_subagent(
         self,
         request: AIRequestT,
@@ -318,22 +348,58 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
         own hooks; a detached one queues it as a separate workflow and returns its handle.
         """
         if not delegation["wait"]:
-            return await self.run_action(
-                start_detached_subagent(request.agent_reference, delegation)
-            )
+            return await self._start_detached_subagent(request, delegation)
         # NOTE: `DelegateAgentResult` types the request as `BaseModel` to avoid an import
         # cycle; it is always the `AIRequestBase` subclass the tool raised with.
         subagent_request = delegation["request"]
         subagent_result = await self.run_agent(subagent_request)  # ty: ignore[invalid-argument-type]
-        return await self.run_action(
-            delegate_tool_result(
-                request.agent_reference,
-                subagent_request.agent_reference,  # ty: ignore[unresolved-attribute]
-                delegation["tool_call_id"],
-                delegation["tool_name"],
-                subagent_result.output,
-            )
+        return await self._delegate_tool_result(
+            request, delegation, subagent_request, subagent_result
         )
+
+    async def _start_detached_subagent(
+        self,
+        request: AIRequestT,
+        delegation: DelegateAgentResult,
+    ) -> ToolActionResult:
+        """Queue a detached subagent. Only a start that provably never ran is retried:
+        a lost one may already have queued the subagent."""
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                return await self.run_action(
+                    start_detached_subagent(request.agent_reference, delegation)
+                )
+            except ActionExecutionNotStarted:
+                if attempt >= request.model_retry.attempts:
+                    await raise_model_attempts_exhausted(attempt)
+
+    async def _delegate_tool_result(
+        self,
+        request: AIRequestT,
+        delegation: DelegateAgentResult,
+        subagent_request: Any,
+        subagent_result: AgentResult,
+    ) -> ToolActionResult:
+        """Turn a subagent's output into the delegating tool's result; replay-safe,
+        so a lost attempt reruns."""
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                return await self.run_action(
+                    delegate_tool_result(
+                        request.agent_reference,
+                        subagent_request.agent_reference,
+                        delegation["tool_call_id"],
+                        delegation["tool_name"],
+                        subagent_result.output,
+                    )
+                )
+            except (ActionExecutionLost, ActionExecutionNotStarted):
+                if attempt >= request.model_retry.attempts:
+                    await raise_model_attempts_exhausted(attempt)
 
     async def _wait_for_agent_messages(
         self,
@@ -349,7 +415,7 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
         # becomes a single durable wait on the mailbox.
         waited_seconds = 0.0
         while True:
-            poll = await self.run_action(read_agent_messages(request.agent_reference, wait))
+            poll = await self._read_agent_messages(request, wait)
             if poll["kind"] == "return":
                 return poll
             timeout_seconds = wait["timeout_seconds"]
@@ -365,6 +431,21 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
             poll_seconds = wait["poll_seconds"]
             await asyncio.sleep(poll_seconds)
             waited_seconds = waited_seconds + poll_seconds
+
+    async def _read_agent_messages(
+        self,
+        request: AIRequestT,
+        wait: WaitForMessagesResult,
+    ) -> ToolActionResult:
+        """One mailbox poll. Claims are keyed by ``claim_key``, so a lost poll reruns."""
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                return await self.run_action(read_agent_messages(request.agent_reference, wait))
+            except (ActionExecutionLost, ActionExecutionNotStarted):
+                if attempt >= request.model_retry.attempts:
+                    await raise_model_attempts_exhausted(attempt)
 
 
 def _specialized_request_type(workflow_cls: type) -> object | None:
