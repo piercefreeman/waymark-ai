@@ -12,6 +12,7 @@ from pydantic_ai.exceptions import (
     ToolFailed,
     ToolFailedError,
     ToolRetryError,
+    UnexpectedModelBehavior,
 )
 from pydantic_ai.messages import TextPart, ToolCallPart
 from pydantic_core import ErrorDetails, to_json
@@ -83,11 +84,22 @@ class RetryableAgentError(RuntimeError):
     """A transient provider failure that may safely rerun its graph-node action."""
 
 
-def _pending_tool_call(call: ToolCallPart, *, sequential: bool) -> ToolCall:
+def _pending_tool_call(call: ToolCallPart, *, tool_manager: Any) -> ToolCall:
     return ToolCall(
         call=dump_tool_call(call),
-        sequential=sequential,
+        sequential=tool_manager.is_sequential(call),
+        max_retries=_tool_max_retries(tool_manager, call.tool_name),
     )
+
+
+def _tool_max_retries(tool_manager: Any, tool_name: str) -> int:
+    """The retry budget Pydantic AI holds this tool to: its own `retries=`, else the
+    agent's default (also what an unknown tool name is charged against)."""
+    tools = tool_manager.tools or {}
+    tool = tools.get(tool_name)
+    if tool is not None:
+        return tool.max_retries
+    return tool_manager.default_max_retries
 
 
 @action(name="pydantic_ai_agent_node")
@@ -185,7 +197,7 @@ async def run_agent_node(
                 tool_calls=[
                     _pending_tool_call(
                         call,
-                        sequential=agent_run.ctx.deps.tool_manager.is_sequential(call),
+                        tool_manager=agent_run.ctx.deps.tool_manager,
                     )
                     for call in pending.requests.calls
                 ],
@@ -565,6 +577,41 @@ async def read_agent_messages(
             ),
         ),
     }
+
+
+@action(name="pydantic_ai_agent_tool_retries_exhausted")
+async def raise_tool_retries_exhausted(tool_name: str, max_retries: int) -> Never:
+    """Fail the run the way Pydantic AI does when a tool exceeds its retry budget.
+
+    Reached when Waymark lost the tool's action more often than the tool's own
+    ``retries=`` allows, so the run ends exactly as a plain Pydantic AI run whose
+    tool kept failing.
+    """
+    raise _tool_retries_exceeded(tool_name, max_retries)
+
+
+def _tool_retries_exceeded(tool_name: str, max_retries: int) -> UnexpectedModelBehavior:
+    """Pydantic AI's own error for a tool over its budget, from its own check, so the
+    message matches whichever Pydantic AI version is installed."""
+    from types import SimpleNamespace
+
+    from pydantic_ai.tool_manager import ToolManager
+
+    spent = SimpleNamespace(ctx=SimpleNamespace(retries={tool_name: max_retries}))
+    try:
+        ToolManager._check_max_retries(  # noqa: SLF001
+            spent,  # ty: ignore[invalid-argument-type]
+            tool_name,
+            max_retries,
+            RuntimeError("Waymark lost the tool's action"),
+        )
+    except UnexpectedModelBehavior as error:
+        return error
+    except Exception:
+        pass
+    return UnexpectedModelBehavior(
+        f"Tool {tool_name!r} exceeded max retries count of {max_retries}"
+    )
 
 
 @action(name="pydantic_ai_agent_model_attempts_exhausted")

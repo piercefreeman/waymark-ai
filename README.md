@@ -222,6 +222,23 @@ Timeouts and `ModelRetry` responses follow Pydantic AI's retry flow across
 Waymark actions. Unhandled tool exceptions fail the workflow. Transient
 model-provider failures use the request's `model_retry` backoff settings.
 
+### Worker restarts
+
+If a worker dies while it runs a model step or a tool call, Waymark reports the
+action as lost. The agent never sees this: a plain Pydantic AI run has no notion of
+a lost worker, so the workflow runs the same step again.
+
+- A lost model step reruns within the request's `model_retry` attempts. Model steps
+  are replay-safe.
+- A lost tool call reruns up to the tool's own `retries=` budget. These reruns are
+  counted separately from `ModelRetry` attempts and send no retry prompt to the model.
+  Past the budget, the run fails with the error Pydantic AI raises when a tool
+  exceeds its retries.
+
+A lost attempt may have finished before the worker died, so tool calls run at least
+once. Set `retries=0` on a tool whose side effects must not repeat. A detached
+subagent is restarted only if its start provably never ran.
+
 Tools that require approval currently stop the workflow with an error. To pause for a
 human, use [message passing](#message-passing) instead.
 
