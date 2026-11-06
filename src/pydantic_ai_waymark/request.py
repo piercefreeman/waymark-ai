@@ -1,3 +1,4 @@
+from importlib import import_module
 from typing import Any, ClassVar, Generic, Self, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -50,3 +51,19 @@ class AIRequestBase(BaseModel, Generic[AgentDependenciesT]):
             raise ValueError(f"request agent must be {expected!r}")
         self.agent_reference = expected
         return self
+
+
+def request_type_reference(request_type: type[AIRequestBase[Any]]) -> str:
+    """Return the importable ``module:QualName`` of a request class."""
+    return f"{request_type.__module__}:{request_type.__qualname__}"
+
+
+def load_request(reference: str, value: object) -> AIRequestBase[Any]:
+    """Validate ``value`` as the request class that ``reference`` names."""
+    module_name, _, qualname = reference.partition(":")
+    request_type: object = import_module(module_name)
+    for name in qualname.split("."):
+        request_type = getattr(request_type, name)
+    if not isinstance(request_type, type) or not issubclass(request_type, AIRequestBase):
+        raise TypeError(f"{reference!r} is not an AIRequestBase subclass")
+    return request_type.model_validate(value)

@@ -93,7 +93,7 @@ import that module. Run this from the project directory:
 export WAYMARK_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/waymark
 export WAYMARK_USER_MODULE=support_workflow
 export OPENAI_API_KEY=...
-uv run waymark-start-workers
+uv run waymark-executor
 ```
 
 With workers running, call the workflow from an async function in your application:
@@ -133,7 +133,10 @@ Open [http://localhost:8000](http://localhost:8000) for the forms and
 [http://localhost:24119](http://localhost:24119) for the dashboard.
 
 The support form calls three tools. The sleep form lets you choose how long the
-agent waits before it resumes.
+agent waits before it resumes. The recursive form runs
+[`examples/recurse_agent.py`](examples/recurse_agent.py): an agent that splits a
+question into parts, delegates each part to a copy of itself, and fact-checks claims
+through a detached subagent and the Iceaxe mailbox.
 
 Stop the stack and delete its example database with:
 
@@ -219,7 +222,8 @@ Timeouts and `ModelRetry` responses follow Pydantic AI's retry flow across
 Waymark actions. Unhandled tool exceptions fail the workflow. Transient
 model-provider failures use the request's `model_retry` backoff settings.
 
-Tools that require approval currently stop the workflow with an error.
+Tools that require approval currently stop the workflow with an error. To pause for a
+human, use [message passing](#message-passing) instead.
 
 ### Sequential tools
 
@@ -267,6 +271,170 @@ from pydantic_ai_waymark import DurableSleep
 def wait_for_follow_up(seconds: float = 5) -> str:
     raise DurableSleep(seconds, result="Follow-up wait completed.")
 ```
+
+## Subagents
+
+A tool hands work to another agent by raising `DelegateAgent` with that agent's
+request. Tools can either wait for the subagent's answer or start it and check on it
+later.
+
+### Wait for the subagent
+
+By default the workflow runs the subagent through `run_agent` as nested durable work:
+each subagent model and tool step is its own action, so a worker restart resumes partway
+through the subagent instead of rerunning it. The subagent's output becomes the tool
+result. Add the subagent's request type to the workflow's type parameter:
+
+```python
+from pydantic_ai_waymark import DelegateAgent
+
+research_agent = waymark_agent(
+    Agent("openai:gpt-5.2", name="research_agent", defer_model_check=True)
+)
+
+
+class ResearchRequest(AIRequestBase[None]):
+    agent = research_agent
+
+
+@support_agent.tool_plain
+def ask_researcher(question: str) -> str:
+    """Ask the research agent a question."""
+    raise DelegateAgent(ResearchRequest(prompt=question))
+
+
+@workflow
+class ResearchedSupportWorkflow(PydanticAIWorkflow[SupportRequest | ResearchRequest]):
+    async def run(self, request: SupportRequest) -> Reply:
+        result = await self.run_agent(request)
+        return result.output
+```
+
+Subagents can use `DurableSleep`, wait for messages, and delegate further.
+[`examples/recurse_agent.py`](examples/recurse_agent.py) shows an agent that delegates to
+itself, with a depth limit carried in its dependencies. When the model
+calls several delegating tools in one turn, their subagents run in parallel. Lifecycle
+hooks fire for subagents too, with the subagent's request. Subagent token usage is
+reported in the subagent's own `AgentResult`, not added to the delegating agent's usage.
+
+### Start the subagent and check later
+
+With `wait=False`, the subagent starts as its own Waymark workflow instance and the tool
+returns a handle right away:
+
+```json
+{"subagent_id": "...", "mailbox": "waymark-subagent:...", "status": "started"}
+```
+
+When the subagent finishes, it sends a report to that mailbox through the delegating
+agent's `message_writer` (see [Message passing](#message-passing)). The report is a JSON
+message: `{"subagent_id", "status": "completed", "output"}`, or
+`{"subagent_id", "status": "failed", "error"}`. A later tool checks the mailbox once
+with `timeout_seconds=0`, or waits for the report:
+
+```python
+@support_agent.tool_plain
+def start_research(question: str) -> str:
+    """Start the research agent without waiting for it."""
+    raise DelegateAgent(ResearchRequest(prompt=question), wait=False)
+
+
+@support_agent.tool_plain
+def check_research(mailbox: str) -> str:
+    """Check whether the research agent has reported back."""
+    raise WaitForMessages(mailbox, timeout_seconds=0, timeout_result="still running")
+```
+
+Detached subagents need the delegating agent to register both `message_reader` and
+`message_writer`, and their request types don't need to appear in the workflow's
+type parameter. Waymark does not deduplicate workflow instances, so if the action that
+starts a detached subagent is retried after the instance was queued, the subagent may run
+twice. Its report is still stored once, because the report uses the subagent ID as its
+`dedupe_key`.
+
+## Message passing
+
+> **Note:** This is a polling workaround. Waymark has no native message queues yet, and
+> those are likely the long-term way to pass messages between workflows. Until then,
+> tools wait on mailboxes that are read through a callback you provide.
+
+A tool raises `WaitForMessages` to wait for messages on a mailbox. The workflow polls the
+agent's `message_reader` every `poll_seconds`, with a durable sleep between polls. It
+returns the first non-empty batch to the model as a list of
+`{"id", "content", "sender", "sent_at"}` objects. With `timeout_seconds`, the tool returns
+`timeout_result` once that much polling time has passed.
+
+```python
+from pydantic_ai import RunContext
+from pydantic_ai_waymark import WaitForMessages
+
+
+@support_agent.tool
+def wait_for_operator(ctx: RunContext[None]) -> str:
+    """Wait for a human operator to reply."""
+    raise WaitForMessages(f"operator:{ctx.run_id}", poll_seconds=1, timeout_seconds=3600)
+```
+
+Register the hooks alongside the agent's codecs. Like codecs, they can be sync or async
+and can declare `Depends(...)` parameters:
+
+```python
+from pydantic_ai_waymark import AgentMessage, MessageQuery, OutgoingMessage
+
+
+async def read_messages(
+    query: MessageQuery, db=Depends(get_db_connection)
+) -> list[AgentMessage]: ...
+
+
+async def write_message(message: OutgoingMessage, db=Depends(get_db_connection)) -> None: ...
+
+
+support_agent = waymark_agent(
+    support_agent,
+    message_reader=read_messages,
+    message_writer=write_message,
+)
+```
+
+Waymark may rerun a poll or a send, so both hooks must be idempotent:
+
+- A reader must return the same messages again for a `claim_key` it has already
+  claimed for. `claim_key` is stable for one waiting tool call.
+- A writer must store each `dedupe_key` at most once.
+
+### Iceaxe mailbox
+
+The `iceaxe` extra ships a ready-made mailbox table and hooks that follow these rules:
+
+```bash
+uv add "pydantic-ai-waymark[iceaxe]"
+```
+
+```python
+from pydantic_ai_waymark.iceaxe import (
+    AgentMessageRecord,
+    message_reader,
+    message_writer,
+    send_message,
+)
+
+support_agent = waymark_agent(
+    support_agent,
+    message_reader=message_reader(get_db_connection),
+    message_writer=message_writer(get_db_connection),
+)
+
+
+async def reply_as_operator(db: DBConnection, run_id: str, text: str) -> None:
+    await send_message(db, mailbox=f"operator:{run_id}", content=text, sender="operator")
+```
+
+`get_db_connection` is a `mountaineer_di` dependency provider that yields an Iceaxe
+`DBConnection`. Import `AgentMessageRecord` into the models module your Iceaxe migrations
+scan so the `waymark_agent_messages` table is created. Readers claim rows with
+`SELECT ... FOR UPDATE SKIP LOCKED`, so concurrent waiters on the same mailbox each
+receive different messages.
 
 ## Lifecycle hooks
 
@@ -380,7 +548,11 @@ async def save_result(result: dict, db=Depends(get_db_connection)) -> None:
 
 ## Checks
 
+The Iceaxe mailbox tests run when `WAYMARK_AI_TEST_DATABASE_URL` points at a PostgreSQL
+database, and are skipped otherwise:
+
 ```bash
+export WAYMARK_AI_TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/waymark_ai_test
 uv run pytest -q
 uv run ruff check .
 uv run ty check

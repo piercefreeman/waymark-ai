@@ -63,9 +63,14 @@ async def _transform_payload(agent_name: str, value: object, *, serialize: bool)
     codec, parameter = (
         (serializer, serializer_parameter) if serialize else (deserializer, deserializer_parameter)
     )
-    async with provide_dependencies(codec, {parameter: value}) as kwargs:
+    return await call_with_dependencies(codec, parameter, value)
+
+
+async def call_with_dependencies(hook: Callable[..., object], parameter: str, value: object) -> Any:
+    """Call a user hook with its one positional value and resolved ``Depends`` arguments."""
+    async with provide_dependencies(hook, {parameter: value}) as kwargs:
         kwargs.pop(parameter)
-        result = cast(Callable[..., object], codec)(value, **kwargs)
+        result = hook(value, **kwargs)
         return await result if inspect.isawaitable(result) else result
 
 
