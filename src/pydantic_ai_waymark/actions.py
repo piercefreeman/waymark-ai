@@ -18,7 +18,7 @@ from pydantic_core import ErrorDetails, to_json
 from pydantic_graph import End
 from waymark import action
 
-from .durability import (
+from .deferred_calls import (
     DelegateAgent,
     DurableSleep,
     PendingToolCallsError,

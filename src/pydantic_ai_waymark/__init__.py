@@ -12,7 +12,7 @@ from .agent import (
     run_agent_tool,
     waymark_agent,
 )
-from .durability import subagent_mailbox
+from .deferred_calls import subagent_mailbox
 from .subagents import SubagentWorkflow
 from .types import (
     AgentMessage,
