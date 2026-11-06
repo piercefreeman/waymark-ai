@@ -436,6 +436,108 @@ scan so the `waymark_agent_messages` table is created. Readers claim rows with
 `SELECT ... FOR UPDATE SKIP LOCKED`, so concurrent waiters on the same mailbox each
 receive different messages.
 
+### Usage example: wait for a human
+
+This module defines a refund agent that pauses until an operator replies, with its
+mailbox stored in the Iceaxe table. Save it as `approval_workflow.py` and include it in
+`WAYMARK_USER_MODULE`:
+
+```python
+import os
+from collections.abc import AsyncIterator
+
+import asyncpg
+from iceaxe import DBConnection
+from pydantic import BaseModel
+from pydantic_ai import Agent, RunContext
+from waymark import workflow
+
+from pydantic_ai_waymark import AIRequestBase, PydanticAIWorkflow, WaitForMessages, waymark_agent
+from pydantic_ai_waymark.iceaxe import message_reader
+
+
+async def get_db_connection() -> AsyncIterator[DBConnection]:
+    db = DBConnection(await asyncpg.connect(os.environ["WAYMARK_DATABASE_URL"]))
+    try:
+        yield db
+    finally:
+        await db.conn.close()
+
+
+class RefundDecision(BaseModel):
+    refund: bool
+    reason: str
+
+
+refund_agent = waymark_agent(
+    Agent(
+        "openai:gpt-5.2",
+        name="refund_agent",
+        instructions="Call wait_for_approval before deciding, and follow the operator's reply.",
+        output_type=RefundDecision,
+        defer_model_check=True,
+    ),
+    message_reader=message_reader(get_db_connection),
+)
+
+
+class RefundRequest(AIRequestBase[None]):
+    agent = refund_agent
+
+
+@refund_agent.tool
+def wait_for_approval(ctx: RunContext[None]) -> list[dict[str, str]]:
+    """Wait for an operator to approve or reject the refund."""
+    raise WaitForMessages(
+        f"approval:{ctx.run_id}",
+        poll_seconds=1,
+        timeout_seconds=600,
+        timeout_result="No operator replied; do not refund.",
+    )
+
+
+@workflow
+class RefundWorkflow(PydanticAIWorkflow[RefundRequest]):
+    async def run(self, request: RefundRequest) -> RefundDecision:
+        result = await self.run_agent(request)
+        return result.output
+```
+
+The application chooses the run ID, so it knows the mailbox before the run starts. While
+the workflow waits, any process with database access can reply, such as a web handler
+for an operator dashboard:
+
+```python
+import asyncio
+from uuid import uuid4
+
+from pydantic_ai_waymark.iceaxe import send_message
+
+from approval_workflow import RefundDecision, RefundRequest, RefundWorkflow, get_db_connection
+
+
+async def reply_to_refund(run_id: str, reply: str) -> None:
+    async for db in get_db_connection():
+        await send_message(db, mailbox=f"approval:{run_id}", content=reply, sender="operator")
+
+
+async def refund_with_approval(question: str) -> RefundDecision:
+    run_id = str(uuid4())
+    decision = asyncio.create_task(
+        RefundWorkflow().run(RefundRequest(prompt=question, run_id=run_id))
+    )
+    # In a real app, store run_id with the order and reply from the operator's request.
+    await reply_to_refund(run_id, "Approved: refund the full amount.")
+    return await decision
+```
+
+A message sent before the agent starts waiting stays in the mailbox until the agent
+claims it. The `waymark_agent_messages` table must exist first; see
+[Iceaxe mailbox](#iceaxe-mailbox).
+
+[`examples/recurse_agent.py`](examples/recurse_agent.py) shows the subagent side: a
+detached fact check that reports back to a mailbox the delegating agent reads later.
+
 ## Lifecycle hooks
 
 Override `on_agent_start`, `on_agent_end`, `on_message`, `on_tool_start`, or
