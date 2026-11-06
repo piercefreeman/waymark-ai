@@ -9,7 +9,7 @@ WORKDIR /app
 
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
-RUN uv sync --no-dev --no-sources --extra openai --extra web
+RUN uv sync --no-dev --no-sources --extra openai --extra web --extra iceaxe
 
 COPY examples ./examples
 

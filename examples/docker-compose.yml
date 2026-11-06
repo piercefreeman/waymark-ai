@@ -17,17 +17,17 @@ services:
     build:
       context: ..
       dockerfile: examples/Dockerfile
-    command: ["waymark-start-workers"]
+    command: ["waymark-executor"]
     env_file: ../.env
     depends_on:
       postgres:
         condition: service_healthy
     environment:
       WAYMARK_DATABASE_URL: postgresql://waymark:waymark@postgres:5432/waymark_ai
-      WAYMARK_USER_MODULE: examples.support_agent
+      WAYMARK_USER_MODULE: examples.workers
       WAYMARK_WORKER_COUNT: 1
-      WAYMARK_WEBAPP_ENABLED: "true"
-      WAYMARK_WEBAPP_ADDR: 0.0.0.0:24119
+      WAYMARK_HTTP_ENABLED: "true"
+      WAYMARK_HTTP_ADDR: 0.0.0.0:24119
     ports:
       - "24119:24119"
 
