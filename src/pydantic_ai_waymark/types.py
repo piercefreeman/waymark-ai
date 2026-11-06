@@ -1,4 +1,5 @@
 from collections.abc import Awaitable, Callable, Sequence
+from datetime import datetime
 from typing import Any, Concatenate, Literal, TypeAlias, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
@@ -201,6 +202,27 @@ class DurableSleepResult(ToolResultBase):
     value: ToolValue
 
 
+class DelegateAgentResult(ToolResultBase):
+    kind: Literal["delegate"]
+    # NOTE: Typed as the base model to avoid importing `AIRequestBase` here; Waymark keeps
+    # the concrete request class across the action boundary.
+    request: BaseModel
+    request_type: str
+    wait: bool
+    subagent_id: str
+    mailbox: str
+
+
+class WaitForMessagesResult(ToolResultBase):
+    kind: Literal["wait_messages"]
+    mailbox: str
+    run_id: str
+    claim_key: str
+    poll_seconds: float
+    timeout_seconds: float | None
+    timeout_value: ToolValue
+
+
 ToolActionResult: TypeAlias = (
     ToolReturnResult
     | ModelRetryResult
@@ -208,7 +230,58 @@ ToolActionResult: TypeAlias = (
     | RetryPromptResult
     | DeferredToolResultPayload
     | DurableSleepResult
+    | DelegateAgentResult
+    | WaitForMessagesResult
 )
+
+
+class AgentMessage(WireModel):
+    """One message delivered to an agent waiting on a mailbox."""
+
+    id: str
+    content: str
+    sender: str | None = None
+    sent_at: datetime | None = None
+
+
+class MessageQuery(WireModel):
+    """What a message reader is asked for on each poll of a mailbox.
+
+    Readers must be idempotent for a ``claim_key``: Waymark may rerun a poll action, and
+    a rerun must return the messages an earlier attempt already claimed rather than
+    dropping them or claiming new ones.
+    """
+
+    mailbox: str
+    claim_key: str
+    agent_reference: str
+    run_id: str
+    tool_call_id: str
+    tool_name: str
+
+
+class OutgoingMessage(WireModel):
+    """One message a workflow asks the agent's message writer to deliver.
+
+    Writers must deliver each ``dedupe_key`` at most once: Waymark may rerun the action
+    that sends it.
+    """
+
+    mailbox: str
+    content: str
+    sender: str | None = None
+    dedupe_key: str
+
+
+MessageWriter: TypeAlias = Callable[
+    Concatenate[OutgoingMessage, ...],
+    None | Awaitable[None],
+]
+
+MessageReader: TypeAlias = Callable[
+    Concatenate[MessageQuery, ...],
+    Sequence[AgentMessage] | Awaitable[Sequence[AgentMessage]],
+]
 
 PayloadKind: TypeAlias = Literal[
     "graph_state",

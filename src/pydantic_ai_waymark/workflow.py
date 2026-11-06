@@ -6,10 +6,13 @@ from waymark import Workflow
 
 from .actions import (
     RetryableAgentError,
+    delegate_tool_result,
     raise_approval_required,
     raise_model_attempts_exhausted,
+    read_agent_messages,
     run_agent_node,
     run_agent_tool,
+    start_detached_subagent,
 )
 from .request import AIRequestBase
 from .types import (
@@ -17,10 +20,12 @@ from .types import (
     AgentResult,
     AgentTransition,
     BackoffConfig,
+    DelegateAgentResult,
     JsonValue,
     SerializedToolCall,
     ToolActionResult,
     ToolCall,
+    WaitForMessagesResult,
 )
 
 AIRequestT = TypeVar("AIRequestT", bound=AIRequestBase[Any])
@@ -279,6 +284,7 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
                 tool_call,
                 deps=request.deps,
                 model=request.model,
+                prompt=request.prompt,
             )
         )
 
@@ -291,10 +297,74 @@ class PydanticAIWorkflow(Workflow, Generic[AIRequestT]):
                 "tool_name": action_result["tool_name"],
                 "value": action_result["value"],
             }
+        elif action_result["kind"] == "delegate":
+            result = await self._run_subagent(request, action_result)
+        elif action_result["kind"] == "wait_messages":
+            result = await self._wait_for_agent_messages(request, action_result)
         else:
             result = action_result
         await self.on_tool_end(request, tool_call.call.tool_call_id, result)
         return result
+
+    async def _run_subagent(
+        self,
+        request: AIRequestT,
+        delegation: DelegateAgentResult,
+    ) -> ToolActionResult:
+        """Run or start a tool's delegated subagent and return the tool call's result.
+
+        ``_run_agent_tool_call`` calls this when a tool raised ``DelegateAgent``. A waiting
+        delegation runs the subagent through ``run_agent`` as nested durable work with its
+        own hooks; a detached one queues it as a separate workflow and returns its handle.
+        """
+        if not delegation["wait"]:
+            return await self.run_action(
+                start_detached_subagent(request.agent_reference, delegation)
+            )
+        # NOTE: `DelegateAgentResult` types the request as `BaseModel` to avoid an import
+        # cycle; it is always the `AIRequestBase` subclass the tool raised with.
+        subagent_request = delegation["request"]
+        subagent_result = await self.run_agent(subagent_request)  # ty: ignore[invalid-argument-type]
+        return await self.run_action(
+            delegate_tool_result(
+                request.agent_reference,
+                subagent_request.agent_reference,  # ty: ignore[unresolved-attribute]
+                delegation["tool_call_id"],
+                delegation["tool_name"],
+                subagent_result.output,
+            )
+        )
+
+    async def _wait_for_agent_messages(
+        self,
+        request: AIRequestT,
+        wait: WaitForMessagesResult,
+    ) -> ToolActionResult:
+        """Poll a mailbox through the agent's message reader until messages or timeout.
+
+        ``_run_agent_tool_call`` calls this when a tool raised ``WaitForMessages``; each
+        poll is its own action and the interval between polls is a durable sleep.
+        """
+        # NOTE: A workaround until Waymark has native message queues; with them this loop
+        # becomes a single durable wait on the mailbox.
+        waited_seconds = 0.0
+        while True:
+            poll = await self.run_action(read_agent_messages(request.agent_reference, wait))
+            if poll["kind"] == "return":
+                return poll
+            timeout_seconds = wait["timeout_seconds"]
+            if timeout_seconds is not None:
+                if waited_seconds >= timeout_seconds:
+                    timed_out: ToolActionResult = {
+                        "kind": "return",
+                        "tool_call_id": wait["tool_call_id"],
+                        "tool_name": wait["tool_name"],
+                        "value": wait["timeout_value"],
+                    }
+                    return timed_out
+            poll_seconds = wait["poll_seconds"]
+            await asyncio.sleep(poll_seconds)
+            waited_seconds = waited_seconds + poll_seconds
 
 
 def _specialized_request_type(workflow_cls: type) -> object | None:

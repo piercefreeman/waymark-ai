@@ -1,3 +1,5 @@
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from html import escape
 from urllib.parse import parse_qs
 
@@ -7,6 +9,13 @@ from pydantic import ValidationError
 from pydantic_ai import ModelMessagesTypeAdapter
 from pydantic_ai.messages import ToolCallPart, ToolReturnPart
 
+from .recurse_agent import (
+    RecurseAnswer,
+    RecurseDependencies,
+    RecurseRequest,
+    RecurseWorkflow,
+    create_mailbox_table,
+)
 from .support_agent import (
     SleepDependencies,
     SleepRequest,
@@ -16,7 +25,14 @@ from .support_agent import (
     SupportWorkflow,
 )
 
-app = FastAPI(title="Pydantic AI + Waymark")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    await create_mailbox_table()
+    yield
+
+
+app = FastAPI(title="Pydantic AI + Waymark", lifespan=lifespan)
 
 
 def support_tool_calls(message_history: str) -> tuple[tuple[str, str, str], ...]:
@@ -44,6 +60,10 @@ def page(
     sleep_seconds: str = "5",
     sleep_answer: str = "",
     sleep_error: str = "",
+    recurse_prompt: str = "",
+    recurse_depth: str = "2",
+    recurse_answer: RecurseAnswer | None = None,
+    recurse_error: str = "",
 ) -> str:
     tool_items = "".join(
         f"<li><strong>{escape(name)}</strong>"
@@ -70,6 +90,24 @@ def page(
         else ""
     )
     sleep_failure = f'<p role="alert">{escape(sleep_error)}</p>' if sleep_error else ""
+    subquestions = (
+        "".join(f"<li>{escape(question)}</li>" for question in recurse_answer.subquestions)
+        if recurse_answer is not None
+        else ""
+    )
+    recurse_result = (
+        f'<section aria-live="polite"><h2>Answer</h2><p>{escape(recurse_answer.answer)}</p>'
+        + (
+            f"<details open><summary>Delegated sub-questions</summary><ol>{subquestions}</ol>"
+            "</details>"
+            if subquestions
+            else ""
+        )
+        + "</section>"
+        if recurse_answer is not None
+        else ""
+    )
+    recurse_failure = f'<p role="alert">{escape(recurse_error)}</p>' if recurse_error else ""
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -113,6 +151,21 @@ def page(
       </form>
       {sleep_failure}
       {sleep_result}
+    </section>
+    <section>
+      <h2>Recursive agent</h2>
+      <p>Splits a question into parts and delegates each part to a copy of itself.</p>
+      <form method="post" action="/recurse">
+        <label for="recurse-prompt">Question</label>
+        <textarea id="recurse-prompt" name="prompt" maxlength="10000"
+                  required>{escape(recurse_prompt)}</textarea>
+        <label for="recurse-depth">Maximum depth (0–3)</label>
+        <input id="recurse-depth" name="max_depth" type="number" min="0" max="3"
+               step="1" value="{escape(recurse_depth)}" required>
+        <button type="submit">Run recursive agent</button>
+      </form>
+      {recurse_failure}
+      {recurse_result}
     </section>
   </main>
 </body>
@@ -174,3 +227,47 @@ async def run_sleep(request: Request) -> HTMLResponse:
     except Exception as error:
         return HTMLResponse(page(sleep_seconds=seconds, sleep_error=str(error)), status_code=500)
     return HTMLResponse(page(sleep_seconds=seconds, sleep_answer=reply))
+
+
+@app.post("/recurse", response_class=HTMLResponse)
+async def run_recurse(request: Request) -> HTMLResponse:
+    body = await request.body()
+    if len(body) > 20_000:
+        return HTMLResponse(page(recurse_error="Question is too long."), status_code=413)
+    try:
+        values = parse_qs(body.decode(), max_num_fields=2)
+    except (UnicodeDecodeError, ValueError):
+        return HTMLResponse(page(recurse_error="Invalid form data."), status_code=400)
+    prompt = values.get("prompt", [""])[0].strip()
+    max_depth = values.get("max_depth", ["2"])[0].strip()
+    if not prompt:
+        return HTMLResponse(
+            page(recurse_depth=max_depth, recurse_error="Question is required."),
+            status_code=422,
+        )
+    try:
+        deps = RecurseDependencies.model_validate({"max_depth": max_depth})
+    except ValidationError:
+        return HTMLResponse(
+            page(
+                recurse_prompt=prompt,
+                recurse_depth=max_depth,
+                recurse_error="Maximum depth must be between 0 and 3.",
+            ),
+            status_code=422,
+        )
+
+    try:
+        answer = await RecurseWorkflow().run(RecurseRequest(prompt=prompt, deps=deps))
+    except Exception as error:
+        return HTMLResponse(
+            page(recurse_prompt=prompt, recurse_depth=max_depth, recurse_error=str(error)),
+            status_code=500,
+        )
+    return HTMLResponse(
+        page(
+            recurse_prompt=prompt,
+            recurse_depth=max_depth,
+            recurse_answer=RecurseAnswer.model_validate(answer),
+        )
+    )

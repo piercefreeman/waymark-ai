@@ -1,4 +1,5 @@
-from typing import Never, cast
+from collections.abc import Sequence
+from typing import Any, Never, cast
 
 from pydantic import TypeAdapter
 from pydantic_ai import _agent_graph
@@ -13,14 +14,23 @@ from pydantic_ai.exceptions import (
     ToolRetryError,
 )
 from pydantic_ai.messages import TextPart, ToolCallPart
-from pydantic_core import ErrorDetails
+from pydantic_core import ErrorDetails, to_json
 from pydantic_graph import End
 from waymark import action
 
-from .durability import DurableSleep, PendingToolCallsError, tool_boundary
-from .registry import registered_agent
+from .deferred_calls import (
+    DelegateAgent,
+    DurableSleep,
+    PendingToolCallsError,
+    WaitForMessages,
+    subagent_mailbox,
+    tool_boundary,
+)
+from .registry import registered_agent, registered_message_reader, registered_message_writer
+from .request import AIRequestBase, load_request, request_type_reference
 from .serialization import (
     bind_node_to_history,
+    call_with_dependencies,
     deferred_results,
     deserialize_payload,
     dump_deps_state,
@@ -41,25 +51,32 @@ from .serialization import (
 from .types import (
     AgentCheckpoint,
     AgentDeps,
+    AgentMessage,
     AgentOutput,
     AgentOutputPayload,
     AgentResult,
     AgentTransition,
+    DelegateAgentResult,
     DoneTransition,
     JsonValue,
+    MessageQuery,
     NodeTransition,
+    OutgoingMessage,
     PersistedPydanticNode,
     PydanticRunNode,
     ToolActionResult,
     ToolCall,
     ToolMetadata,
     ToolOutputPayload,
+    ToolReturnResult,
     ToolsTransition,
     UsagePayload,
+    WaitForMessagesResult,
 )
 
 tool_metadata_adapter = TypeAdapter(dict[str, JsonValue])
 tool_action_results_adapter = TypeAdapter(list[ToolActionResult])
+agent_messages_adapter = TypeAdapter(list[AgentMessage])
 
 
 class RetryableAgentError(RuntimeError):
@@ -238,8 +255,14 @@ async def run_agent_tool(
     *,
     deps: AgentDeps = None,
     model: str | None = None,
+    prompt: str | None = None,
 ) -> ToolActionResult:
-    """Execute one validated Pydantic AI tool call as a Waymark action."""
+    """Execute one validated Pydantic AI tool call as a Waymark action.
+
+    ``prompt`` is the run's user prompt, so tools see it as ``ctx.prompt``; a restored
+    call-tools node does not carry it. It defaults to ``None`` so in-flight runs whose
+    workflows were compiled without it still resume.
+    """
     agent = registered_agent(agent_name)
     deps = restore_agent_deps(agent, deps)
     if checkpoint.state is None or checkpoint.node is None or checkpoint.deps_state is None:
@@ -254,7 +277,7 @@ async def run_agent_tool(
     call = load_tool_call(tool_call.call)
 
     async with agent.iter(
-        node.user_prompt,
+        prompt if prompt is not None else node.user_prompt,
         message_history=state.message_history,
         deps=deps,
         model=model,
@@ -311,6 +334,44 @@ async def run_agent_tool(
                     ToolOutputPayload(value=sleep.result),
                 ),
             }
+        except DelegateAgent as delegation:
+            if not delegation.wait and registered_message_writer(agent_name) is None:
+                raise RuntimeError(
+                    f"agent {agent_name!r} starts a detached subagent but registers no "
+                    "message_writer; pass message_writer= to waymark_agent()"
+                ) from None
+            subagent_id = f"{agent_run.ctx.state.run_id}:{call.tool_call_id}"
+            return {
+                "kind": "delegate",
+                "tool_call_id": call.tool_call_id,
+                "tool_name": call.tool_name,
+                "request": delegation.request,
+                "request_type": request_type_reference(type(delegation.request)),
+                "wait": delegation.wait,
+                "subagent_id": subagent_id,
+                "mailbox": subagent_mailbox(subagent_id),
+            }
+        except WaitForMessages as wait:
+            if registered_message_reader(agent_name) is None:
+                raise RuntimeError(
+                    f"agent {agent_name!r} waits for messages but registers no "
+                    "message_reader; pass message_reader= to waymark_agent()"
+                ) from None
+            return {
+                "kind": "wait_messages",
+                "tool_call_id": call.tool_call_id,
+                "tool_name": call.tool_name,
+                "mailbox": wait.mailbox,
+                "run_id": agent_run.ctx.state.run_id,
+                # Tool-call IDs are only unique within a run, so scope claims to it.
+                "claim_key": f"{agent_run.ctx.state.run_id}:{call.tool_call_id}",
+                "poll_seconds": wait.poll_seconds,
+                "timeout_seconds": wait.timeout_seconds,
+                "timeout_value": await serialize_payload(
+                    agent_name,
+                    ToolOutputPayload(value=wait.timeout_result),
+                ),
+            }
         except (CallDeferred, ApprovalRequired):
             return {
                 "kind": "deferred",
@@ -326,6 +387,184 @@ async def run_agent_tool(
                 ToolOutputPayload(value=value),
             ),
         }
+
+
+@action(name="pydantic_ai_agent_delegate_result")
+async def delegate_tool_result(
+    agent_name: str,
+    subagent_name: str,
+    tool_call_id: str,
+    tool_name: str,
+    output: AgentOutput,
+) -> ToolReturnResult:
+    """Turn a finished subagent's output into the delegating tool call's return value.
+
+    The two agents may register different payload codecs, so the output is restored with
+    the subagent's codec and stored again with the delegating agent's.
+    """
+    value = await deserialize_payload(subagent_name, "agent_output", output)
+    return {
+        "kind": "return",
+        "tool_call_id": tool_call_id,
+        "tool_name": tool_name,
+        "value": await serialize_payload(agent_name, ToolOutputPayload(value=value)),
+    }
+
+
+@action(name="pydantic_ai_agent_start_detached_subagent")
+async def start_detached_subagent(
+    agent_name: str,
+    delegation: DelegateAgentResult,
+) -> ToolReturnResult:
+    """Queue a detached subagent as its own workflow and return its handle to the model.
+
+    NOTE: Waymark does not deduplicate workflow instances, so a rerun of this action after
+    the instance was queued starts the subagent twice; its result is still delivered once
+    because the report's ``dedupe_key`` is the subagent id.
+    """
+    from .subagents import DetachedSubagentRequest, SubagentWorkflow
+
+    # NOTE: `@workflow` adds `_blocking` to the public `run`, which type checkers can't see.
+    subagent_workflow: Any = SubagentWorkflow()
+    await subagent_workflow.run(
+        DetachedSubagentRequest(
+            # NOTE: Waymark passes this nested request as a plain dict; the subagent
+            # workflow rebuilds its concrete class from `request_type`.
+            request=_request_data(delegation["request"]),
+            request_type=delegation["request_type"],
+            parent_agent=agent_name,
+            subagent_id=delegation["subagent_id"],
+            mailbox=delegation["mailbox"],
+        ),
+        _blocking=False,
+    )
+    return {
+        "kind": "return",
+        "tool_call_id": delegation["tool_call_id"],
+        "tool_name": delegation["tool_name"],
+        "value": await serialize_payload(
+            agent_name,
+            ToolOutputPayload(
+                value={
+                    "subagent_id": delegation["subagent_id"],
+                    "mailbox": delegation["mailbox"],
+                    "status": "started",
+                }
+            ),
+        ),
+    }
+
+
+def _request_data(request: object) -> dict[str, JsonValue]:
+    if isinstance(request, AIRequestBase):
+        return request.model_dump(mode="json")
+    return tool_metadata_adapter.validate_python(request)
+
+
+@action(name="pydantic_ai_agent_load_subagent_request")
+async def load_subagent_request(
+    request_type: str,
+    request: dict[str, JsonValue],
+) -> AIRequestBase[Any]:
+    """Rebuild a detached subagent's request as its concrete request class."""
+    return load_request(request_type, request)
+
+
+async def _send_message(agent_name: str, message: OutgoingMessage) -> None:
+    writer = registered_message_writer(agent_name)
+    if writer is None:
+        raise RuntimeError(f"agent {agent_name!r} registers no message_writer")
+    hook, parameter = writer
+    await call_with_dependencies(hook, parameter, message)
+
+
+@action(name="pydantic_ai_agent_report_subagent_result")
+async def report_subagent_result(
+    parent_agent: str,
+    subagent_name: str,
+    subagent_id: str,
+    mailbox: str,
+    output: AgentOutput,
+) -> None:
+    """Send a finished detached subagent's output to its mailbox."""
+    value = await deserialize_payload(subagent_name, "agent_output", output)
+    report = {"subagent_id": subagent_id, "status": "completed", "output": value}
+    await _send_message(
+        parent_agent,
+        OutgoingMessage(
+            mailbox=mailbox,
+            content=to_json(report).decode(),
+            sender=subagent_name,
+            dedupe_key=subagent_id,
+        ),
+    )
+
+
+@action(name="pydantic_ai_agent_report_subagent_failure")
+async def report_subagent_failure(
+    parent_agent: str,
+    subagent_name: str,
+    subagent_id: str,
+    mailbox: str,
+    error: object,
+) -> Never:
+    """Send a failed detached subagent's error to its mailbox, then fail its workflow."""
+    message = error.get("message") if isinstance(error, dict) else None
+    report = {
+        "subagent_id": subagent_id,
+        "status": "failed",
+        "error": str(message if message is not None else error),
+    }
+    await _send_message(
+        parent_agent,
+        OutgoingMessage(
+            mailbox=mailbox,
+            content=to_json(report).decode(),
+            sender=subagent_name,
+            dedupe_key=subagent_id,
+        ),
+    )
+    raise RuntimeError(f"detached subagent {subagent_id!r} failed: {report['error']}")
+
+
+@action(name="pydantic_ai_agent_read_messages")
+async def read_agent_messages(
+    agent_name: str,
+    wait: WaitForMessagesResult,
+) -> ToolActionResult:
+    """Poll a waiting tool call's mailbox once through the agent's message reader.
+
+    Returns a ``return`` result holding the messages when any arrived, and the unchanged
+    ``wait_messages`` result when the mailbox is still empty.
+    """
+    reader = registered_message_reader(agent_name)
+    if reader is None:
+        raise RuntimeError(f"agent {agent_name!r} registers no message_reader")
+    hook, parameter = reader
+    query = MessageQuery(
+        mailbox=wait["mailbox"],
+        claim_key=wait["claim_key"],
+        agent_reference=agent_name,
+        run_id=wait["run_id"],
+        tool_call_id=wait["tool_call_id"],
+        tool_name=wait["tool_name"],
+    )
+    messages: Sequence[AgentMessage] = agent_messages_adapter.validate_python(
+        await call_with_dependencies(hook, parameter, query)
+    )
+    if not messages:
+        return wait
+    return {
+        "kind": "return",
+        "tool_call_id": wait["tool_call_id"],
+        "tool_name": wait["tool_name"],
+        "value": await serialize_payload(
+            agent_name,
+            ToolOutputPayload(
+                value=[message.model_dump(mode="json", exclude_none=True) for message in messages]
+            ),
+        ),
+    }
 
 
 @action(name="pydantic_ai_agent_model_attempts_exhausted")

@@ -17,12 +17,16 @@ dependencies = [
 [project.optional-dependencies]
 openai = ["pydantic-ai-slim[openai]>=2.21,<3"]
 web = ["fastapi>=0.116,<1", "uvicorn>=0.35,<1"]
+iceaxe = [
+    "iceaxe>=0.16.0",
+]
 
 [dependency-groups]
 dev = [
   "click>=8.1",
   "fastapi>=0.116,<1",
   "httpx>=0.28,<1",
+  "iceaxe>=0.16.0",
   "pydantic-ai-slim[openai]>=2.21,<3",
   "pytest>=8",
   "ruff>=0.12",
@@ -42,6 +46,9 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["B", "E", "F", "I", "N", "W"]
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["mountaineer_di.Depends"]
 
 [tool.determystic]
 paths_include = ["src", "tests", "examples"]

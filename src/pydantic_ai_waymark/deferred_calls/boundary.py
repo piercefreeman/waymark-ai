@@ -1,4 +1,9 @@
-import math
+"""The capability that stops a graph node before any tool body runs.
+
+Every tool call is deferred out of the model-step action, so each one can run as its own
+Waymark action instead.
+"""
+
 from typing import Never
 
 from pydantic_ai import RunContext
@@ -12,22 +17,7 @@ from pydantic_ai.exceptions import CallDeferred
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.tools import DeferredToolRequests, ToolDefinition
 
-from .types import AgentDeps, ToolValue
-
-
-class DurableSleep(CallDeferred):
-    """Ask the enclosing Waymark workflow to wait before returning this tool result."""
-
-    def __init__(self, seconds: float, result: ToolValue = "Sleep completed.") -> None:
-        seconds = float(seconds)
-        if not math.isfinite(seconds) or seconds < 0:
-            raise ValueError("sleep duration must be finite and non-negative")
-        self.seconds = seconds
-        self.result = result
-        super().__init__()
-
-    def __reduce__(self) -> tuple[type, tuple[float, ToolValue]]:
-        return type(self), (self.seconds, self.result)
+from ..types import AgentDeps
 
 
 class PendingToolCallsError(Exception):
