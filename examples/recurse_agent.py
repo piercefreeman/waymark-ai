@@ -29,22 +29,7 @@ from pydantic_ai_waymark import (
 )
 from pydantic_ai_waymark.iceaxe import AgentMessageRecord, message_reader, message_writer
 
-
-class RecurseDependencies(BaseModel):
-    depth: int = Field(default=0, ge=0)
-    max_depth: int = Field(default=2, ge=0, le=3)
-
-
-class RecurseAnswer(BaseModel):
-    answer: str
-    subquestions: list[str]
-
-
-class FactCheck(BaseModel):
-    claim: str
-    verdict: Literal["plausible", "doubtful", "unverifiable"]
-    reasoning: str
-    verify_with: str
+# Global
 
 
 async def get_db() -> AsyncIterator[DBConnection]:
@@ -67,6 +52,19 @@ async def create_mailbox_table() -> None:
             await create_all(db, [AgentMessageRecord])
 
 
+# Main Agent
+
+
+class RecurseDependencies(BaseModel):
+    depth: int = Field(default=0, ge=0)
+    max_depth: int = Field(default=2, ge=0, le=3)
+
+
+class RecurseAnswer(BaseModel):
+    answer: str
+    subquestions: list[str]
+
+
 recurse_agent = waymark_agent(
     Agent(
         "openai:gpt-5.2",
@@ -79,30 +77,11 @@ recurse_agent = waymark_agent(
     message_writer=message_writer(get_db),
 )
 
-fact_check_agent = waymark_agent(
-    Agent(
-        "openai:gpt-5.2",
-        name="fact_check_agent",
-        instructions=(
-            "You have no tools or sources, so you cannot confirm anything. Judge only whether "
-            "the claim is plausible from general knowledge, never add specifics such as route "
-            "numbers, schedules, or addresses that the claim does not contain, and name the "
-            "source that would confirm it in verify_with."
-        ),
-        output_type=FactCheck,
-        defer_model_check=True,
-    )
-)
-
 
 class RecurseRequest(AIRequestBase[RecurseDependencies]):
     agent = recurse_agent
 
     deps: RecurseDependencies | None = Field(default_factory=RecurseDependencies)
-
-
-class FactCheckRequest(AIRequestBase[None]):
-    agent = fact_check_agent
 
 
 # A sub-question that repeats nearly all of the question's key words restates the whole question.
@@ -188,3 +167,33 @@ class RecurseWorkflow(PydanticAIWorkflow[RecurseRequest]):
     async def run(self, request: RecurseRequest) -> RecurseAnswer:
         result = await self.run_agent(request)
         return result.output
+
+
+# Sub Agent
+
+
+class FactCheck(BaseModel):
+    claim: str
+    verdict: Literal["plausible", "doubtful", "unverifiable"]
+    reasoning: str
+    verify_with: str
+
+
+fact_check_agent = waymark_agent(
+    Agent(
+        "openai:gpt-5.2",
+        name="fact_check_agent",
+        instructions=(
+            "You have no tools or sources, so you cannot confirm anything. Judge only whether "
+            "the claim is plausible from general knowledge, never add specifics such as route "
+            "numbers, schedules, or addresses that the claim does not contain, and name the "
+            "source that would confirm it in verify_with."
+        ),
+        output_type=FactCheck,
+        defer_model_check=True,
+    )
+)
+
+
+class FactCheckRequest(AIRequestBase[None]):
+    agent = fact_check_agent
