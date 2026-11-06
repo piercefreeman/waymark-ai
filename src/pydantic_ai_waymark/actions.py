@@ -333,6 +333,8 @@ async def raise_model_attempts_exhausted(attempts: int) -> Never:
     raise RuntimeError(f"model request failed after {attempts} transient attempts")
 
 
+# NOTE: No longer emitted; parallel tool segments now rely on `asyncio.gather` raising the
+# first failure. Kept registered so in-flight runs compiled against it can still finish.
 @action(name="pydantic_ai_parallel_tool_results")
 async def resolve_parallel_tool_results(
     results: list[object],

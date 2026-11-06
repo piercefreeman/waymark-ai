@@ -11,7 +11,7 @@ requires-python = ">=3.12"
 dependencies = [
   "mountaineer-di>=0.2",
   "pydantic-ai-slim>=2.21,<3",
-  "waymark>=0.30.0.dev7,<0.31",
+  "waymark>=0.30.0",
 ]
 
 [project.optional-dependencies]

@@ -3,10 +3,11 @@
 # requires-python = ">=3.12"
 # dependencies = ["click>=8.1"]
 # ///
-"""Emit a GitHub Actions matrix covering every supported Pydantic AI minor release.
+"""Emit a GitHub Actions matrix covering the supported minor releases of a PyPI package.
 
 Each entry pins the latest stable patch of one minor line, from ``--minimum`` up to the
-newest release on PyPI, so CI exercises new Pydantic AI versions as soon as they ship.
+newest release on PyPI (optionally only the newest ``--limit`` lines), so CI exercises new
+dependency versions as soon as they ship.
 """
 
 from __future__ import annotations
@@ -76,13 +77,17 @@ def latest_patch_by_minor(
 
 
 @click.command(help=__doc__)
-@click.option("--package", default="pydantic-ai-slim", show_default=True)
+@click.option("--package", required=True, help="PyPI distribution name.")
 @click.option(
     "--minimum",
-    default="2.21",
-    show_default=True,
+    required=True,
     callback=parse_minor_line,
     help="Oldest supported MAJOR.MINOR line.",
+)
+@click.option(
+    "--limit",
+    type=click.IntRange(min=1),
+    help="Only include the newest N minor lines.",
 )
 @click.option(
     "--releases-file",
@@ -93,10 +98,11 @@ def latest_patch_by_minor(
 def main(
     package: str,
     minimum: tuple[int, int],
+    limit: int | None,
     releases_file: Path | None,
     pretty: bool,
 ) -> None:
-    versions = latest_patch_by_minor(load_release_map(package, releases_file), minimum)
+    versions = latest_patch_by_minor(load_release_map(package, releases_file), minimum)[:limit]
     if not versions:
         raise click.ClickException(
             f"No stable {package} releases found at or above {minimum[0]}.{minimum[1]}."

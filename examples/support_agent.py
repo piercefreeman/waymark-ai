@@ -120,16 +120,14 @@ class SupportWorkflow(PydanticAIWorkflow[SupportRequest]):
 @workflow
 class SleepWorkflow(PydanticAIWorkflow[SleepRequest]):
     async def run(self, request: SleepRequest) -> str:
-        return (await self.run_agent(request)).output
+        result = await self.run_agent(request)
+        return result.output
 
 
 @action
 async def combine_parallel_support_results(
     results: tuple[object, object],
 ) -> ParallelSupportReply:
-    for result in results:
-        if isinstance(result, BaseException):
-            raise result
     support_result = AgentResult.model_validate(results[0])
     review_result = AgentResult.model_validate(results[1])
     return ParallelSupportReply(
@@ -148,6 +146,5 @@ class ParallelSupportWorkflow(PydanticAIWorkflow[SupportRequest | ReviewRequest]
         results: tuple[object, object] = await asyncio.gather(
             self.run_agent(support_request),
             self.run_agent(review_request),
-            return_exceptions=True,
         )
         return await combine_parallel_support_results(results)
