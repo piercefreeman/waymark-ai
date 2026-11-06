@@ -436,11 +436,11 @@ scan so the `waymark_agent_messages` table is created. Readers claim rows with
 `SELECT ... FOR UPDATE SKIP LOCKED`, so concurrent waiters on the same mailbox each
 receive different messages.
 
-### Usage example: wait for a human
+### Usage example: hand a sub-task to a subagent
 
-This module defines a refund agent that pauses until an operator replies, with its
-mailbox stored in the Iceaxe table. Save it as `approval_workflow.py` and include it in
-`WAYMARK_USER_MODULE`:
+This module defines a writer agent that hands competitor research to a research
+subagent, keeps drafting while the research runs, then collects the findings. Save it
+as `launch_workflow.py` and include it in `WAYMARK_USER_MODULE`:
 
 ```python
 import os
@@ -449,11 +449,17 @@ from collections.abc import AsyncIterator
 import asyncpg
 from iceaxe import DBConnection
 from pydantic import BaseModel
-from pydantic_ai import Agent, RunContext
+from pydantic_ai import Agent
 from waymark import workflow
 
-from pydantic_ai_waymark import AIRequestBase, PydanticAIWorkflow, WaitForMessages, waymark_agent
-from pydantic_ai_waymark.iceaxe import message_reader
+from pydantic_ai_waymark import (
+    AIRequestBase,
+    DelegateAgent,
+    PydanticAIWorkflow,
+    WaitForMessages,
+    waymark_agent,
+)
+from pydantic_ai_waymark.iceaxe import message_reader, message_writer
 
 
 async def get_db_connection() -> AsyncIterator[DBConnection]:
@@ -464,79 +470,101 @@ async def get_db_connection() -> AsyncIterator[DBConnection]:
         await db.conn.close()
 
 
-class RefundDecision(BaseModel):
-    refund: bool
-    reason: str
+class Findings(BaseModel):
+    competitors: list[str]
+    summary: str
 
 
-refund_agent = waymark_agent(
+class LaunchBrief(BaseModel):
+    headline: str
+    positioning: str
+
+
+research_agent = waymark_agent(
     Agent(
         "openai:gpt-5.2",
-        name="refund_agent",
-        instructions="Call wait_for_approval before deciding, and follow the operator's reply.",
-        output_type=RefundDecision,
+        name="research_agent",
+        instructions="Research the competitors for the product you are given.",
+        output_type=Findings,
+        defer_model_check=True,
+    )
+)
+
+writer_agent = waymark_agent(
+    Agent(
+        "openai:gpt-5.2",
+        name="writer_agent",
+        instructions=(
+            "Write a launch brief. First call start_research, then draft, then call "
+            "collect_research with the returned mailbox and use the findings."
+        ),
+        output_type=LaunchBrief,
         defer_model_check=True,
     ),
     message_reader=message_reader(get_db_connection),
+    message_writer=message_writer(get_db_connection),
 )
 
 
-class RefundRequest(AIRequestBase[None]):
-    agent = refund_agent
+class ResearchRequest(AIRequestBase[None]):
+    agent = research_agent
 
 
-@refund_agent.tool
-def wait_for_approval(ctx: RunContext[None]) -> list[dict[str, str]]:
-    """Wait for an operator to approve or reject the refund."""
+class LaunchRequest(AIRequestBase[None]):
+    agent = writer_agent
+
+
+@writer_agent.tool_plain
+def start_research(product: str) -> dict[str, str]:
+    """Start researching competitors in the background; returns a handle with a mailbox."""
+    raise DelegateAgent(ResearchRequest(prompt=product), wait=False)
+
+
+@writer_agent.tool_plain
+def collect_research(mailbox: str) -> list[dict[str, str]]:
+    """Wait up to two minutes for the research started with start_research."""
     raise WaitForMessages(
-        f"approval:{ctx.run_id}",
-        poll_seconds=1,
-        timeout_seconds=600,
-        timeout_result="No operator replied; do not refund.",
+        mailbox,
+        timeout_seconds=120,
+        timeout_result="Research is not ready; write without it.",
     )
 
 
 @workflow
-class RefundWorkflow(PydanticAIWorkflow[RefundRequest]):
-    async def run(self, request: RefundRequest) -> RefundDecision:
+class LaunchWorkflow(PydanticAIWorkflow[LaunchRequest]):
+    async def run(self, request: LaunchRequest) -> LaunchBrief:
         result = await self.run_agent(request)
         return result.output
 ```
 
-The application chooses the run ID, so it knows the mailbox before the run starts. While
-the workflow waits, any process with database access can reply, such as a web handler
-for an operator dashboard:
+The application runs it like any other workflow:
 
 ```python
-import asyncio
-from uuid import uuid4
-
-from pydantic_ai_waymark.iceaxe import send_message
-
-from approval_workflow import RefundDecision, RefundRequest, RefundWorkflow, get_db_connection
+from launch_workflow import LaunchBrief, LaunchRequest, LaunchWorkflow
 
 
-async def reply_to_refund(run_id: str, reply: str) -> None:
-    async for db in get_db_connection():
-        await send_message(db, mailbox=f"approval:{run_id}", content=reply, sender="operator")
-
-
-async def refund_with_approval(question: str) -> RefundDecision:
-    run_id = str(uuid4())
-    decision = asyncio.create_task(
-        RefundWorkflow().run(RefundRequest(prompt=question, run_id=run_id))
-    )
-    # In a real app, store run_id with the order and reply from the operator's request.
-    await reply_to_refund(run_id, "Approved: refund the full amount.")
-    return await decision
+async def write_launch_brief(product: str) -> LaunchBrief:
+    return await LaunchWorkflow().run(LaunchRequest(prompt=product))
 ```
 
-A message sent before the agent starts waiting stays in the mailbox until the agent
-claims it. The `waymark_agent_messages` table must exist first; see
-[Iceaxe mailbox](#iceaxe-mailbox).
+Behind the scenes:
 
-[`examples/recurse_agent.py`](examples/recurse_agent.py) shows the subagent side: a
-detached fact check that reports back to a mailbox the delegating agent reads later.
+1. The model calls `start_research`. Its action catches `DelegateAgent(..., wait=False)`,
+   queues a separate `SubagentWorkflow` instance for `research_agent`, and returns the
+   handle to the model, so the writer keeps going.
+2. The research workflow runs `research_agent` step by step as its own actions. When it
+   finishes, a final action sends the findings to the handle's mailbox through
+   `message_writer`, as a JSON report with `"status": "completed"` and the `"output"`.
+3. The model calls `collect_research`. `WaitForMessages` turns into a loop in the writer's
+   workflow: an action asks `message_reader` for the mailbox's messages, and while it's
+   empty, a durable one-second sleep before the next poll. The first report it finds
+   becomes the tool result.
+
+To wait for the answer inside the tool call instead, drop `wait=False`: the research
+then runs as nested work in the writer's own workflow, its output becomes the tool
+result directly, and no mailbox is involved. Add `ResearchRequest` to
+`PydanticAIWorkflow[LaunchRequest | ResearchRequest]` in that case. The
+`waymark_agent_messages` table must exist first; see [Iceaxe mailbox](#iceaxe-mailbox).
 
 ## Lifecycle hooks
 
