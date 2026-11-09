@@ -12,12 +12,21 @@ import pytest
 from mountaineer_di import Depends
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ValidationError
-from pydantic_ai import Agent, BinaryContent, ModelMessagesTypeAdapter, RunContext, Tool
+from pydantic_ai import (
+    Agent,
+    BinaryContent,
+    ModelMessagesTypeAdapter,
+    RunContext,
+    Tool,
+    _agent_graph,
+)
 from pydantic_ai.exceptions import ModelAPIError, ModelRetry
 from pydantic_ai.messages import BinaryImage, ToolReturn
+from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.toolsets import FunctionToolset
 from waymark import action, bridge, workflow
 from waymark.actions import serialize_returned_value
@@ -36,7 +45,11 @@ from pydantic_ai_waymark import (
     run_agent_tool,
     waymark_agent,
 )
-from pydantic_ai_waymark.serialization import deferred_results
+from pydantic_ai_waymark.serialization import (
+    deferred_results,
+    dump_graph_state,
+    load_graph_state,
+)
 
 # NOTE: openai<3 sends requests through `httpx` and openai>=3 through `httpx2`. Mock
 # whichever transport library the installed SDK uses so one suite covers both.
@@ -944,6 +957,28 @@ def test_model_action_state_grows_linearly_with_message_history(monkeypatch) -> 
     result = asyncio.run(HistoryWorkflow().run(HistoryRequest(prompt="grow")))
 
     assert sum(node_result_sizes) < 6 * len(result.message_history.encode())
+
+
+def test_graph_state_checkpoint_omits_tool_definitions() -> None:
+    state = _agent_graph.GraphAgentState(
+        run_step=3,
+        last_max_tokens=128,
+        last_model_request_parameters=ModelRequestParameters(
+            function_tools=[ToolDefinition(name="lookup_orders", description="Find orders.")]
+        ),
+    )
+
+    async def round_trip() -> tuple[str, _agent_graph.GraphAgentState]:
+        dumped = await dump_graph_state("test_agent", state)
+        return dumped, await load_graph_state("test_agent", dumped)
+
+    dumped, restored = asyncio.run(round_trip())
+
+    assert "lookup_orders" not in dumped
+    assert restored.last_model_request_parameters is None
+    assert restored.run_id == state.run_id
+    assert restored.run_step == 3
+    assert restored.last_max_tokens == 128
 
 
 def test_unhandled_tool_exception_fails_without_retry() -> None:

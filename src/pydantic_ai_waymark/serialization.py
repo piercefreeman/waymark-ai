@@ -156,7 +156,11 @@ async def dump_graph_state(
 ) -> str:
     return await _dump_json(
         agent_name,
-        GraphStatePayload(value=replace(state, message_history=[])),
+        # NOTE: History is stored as checkpoint chunks. The request parameters repeat every
+        # tool definition, nothing reads them back, and each model request sets them anew.
+        GraphStatePayload(
+            value=replace(state, message_history=[], last_model_request_parameters=None)
+        ),
         state_adapter,
     )
 
